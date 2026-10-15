@@ -256,7 +256,7 @@ export class Bridge {
   private async turn(room: Room, { message, speakerId }: Asked): Promise<void> {
     const { agent, spaceId } = room;
     const speaker = speakerId === undefined ? this.options.chips : this.options.chips.as(speakerId);
-    const run = await speaker.runs.start({ spaceId, goal: goalOf(message) });
+    const run = await speaker.runs.start({ spaceId, goal: goalOf(message, agent.config.name) });
     const turn: Turn = {
       run,
       speaker,
@@ -606,9 +606,11 @@ function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function goalOf(message: MessageNew): string {
+/** The run's goal: the message's first line, without the @ it opened with — the agent's whole name. */
+export function goalOf(message: MessageNew, name: string): string {
   const first = message.text.split("\n").find((line) => line.trim() !== "")?.trim() ?? "";
-  const goal = first.replace(/^@\S+\s*/, "");
+  const named = first.toLowerCase().startsWith(`@${name.toLowerCase()}`);
+  const goal = named ? first.slice(name.length + 1).trim() : first.replace(/^@\S+\s*/, "");
   return (goal === "" ? `Answer ${message.from.display_name}` : goal).slice(0, 300);
 }
 
