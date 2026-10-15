@@ -1,0 +1,26 @@
+{
+  "name": "chips-hermes",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Hermes Agent as a Chips harness, on its Runs API: each profile a Chips agent, each room a Hermes session.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "start": "tsx src/main.ts",
+    "test": "node --import tsx --test test/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@chips/harness": "file:vendor/chips-harness-0.0.0.tgz",
+    "@chips/protocol": "file:vendor/chips-protocol-0.0.0.tgz",
+    "tsx": "4.21.0"
+  },
+  "devDependencies": {
+    "@chips/conformance": "file:vendor/chips-conformance-0.0.0.tgz",
+    "@types/node": "22.19.0",
+    "typescript": "5.9.3"
+  }
+}
