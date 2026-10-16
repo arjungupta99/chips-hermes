@@ -18,50 +18,34 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { connect, fileStore, join as joinChips } from "@chips/harness";
-import { type AgentConfig, Bridge, type BridgeState } from "./bridge.js";
-
-interface Config {
-  readonly name?: string;
-  readonly agents: readonly AgentConfig[];
-}
+import { connect, fileStore, helloOnce, join as joinChips } from "@chipschat/harness";
+import { Bridge, type BridgeState } from "./bridge.js";
+import { type Config, checkHermes, readConfig, SetupError } from "./setup.js";
 
 const home = (path: string) => (path.startsWith("~/") ? join(homedir(), path.slice(2)) : path);
-
-function readConfig(path: string): Config {
-  const raw = JSON.parse(readFileSync(path, "utf8")) as { name?: unknown; url?: unknown; agents?: unknown };
-  const url = typeof raw.url === "string" ? raw.url : "http://127.0.0.1:8642";
-  if (!Array.isArray(raw.agents) || raw.agents.length === 0) {
-    throw new Error(`${path} names no agents: { "agents": [{ "name", "profile", "keyEnv" }] }`);
-  }
-  const agents = (raw.agents as Record<string, unknown>[]).map((agent) => {
-    const keyEnv = typeof agent["keyEnv"] === "string" ? agent["keyEnv"] : "API_SERVER_KEY";
-    const key = process.env[keyEnv];
-    if (typeof agent["name"] !== "string") throw new Error(`each agent in ${path} has a name`);
-    if (key === undefined || key === "") throw new Error(`${agent["name"]}'s key is not in $${keyEnv}`);
-    return {
-      name: agent["name"],
-      address: {
-        url: typeof agent["url"] === "string" ? agent["url"] : url,
-        key,
-        ...(typeof agent["profile"] === "string" ? { profile: agent["profile"] } : {}),
-      },
-      ...(typeof agent["model"] === "string" ? { model: agent["model"] } : {}),
-    };
-  });
-  return { ...(typeof raw.name === "string" ? { name: raw.name } : {}), agents };
-}
+const link = process.env["CHIPS_JOIN_LINK"] || undefined;
 
 const configPath = resolve(home(process.argv[2] ?? "~/.chips-hermes/config.json"));
-const config = readConfig(configPath);
+// What it needs, checked before a link is taken up, which works once. Started without a link, a
+// bridge up before Hermes waits for it, and says so in Chips meanwhile.
+let config: Config;
+try {
+  config = readConfig(configPath);
+  if (link !== undefined) await checkHermes(config);
+} catch (error) {
+  if (!(error instanceof SetupError)) throw error;
+  process.stderr.write(`${error.message}\n`);
+  process.exit(1);
+}
+const name = config.name ?? "Hermes";
 const folder = dirname(configPath);
 const statePath = join(folder, "sessions.json");
 const log = (line: string) => process.stdout.write(`${new Date().toISOString()} ${line}\n`);
 
 const joined = await joinChips({
-  link: process.env["CHIPS_JOIN_LINK"],
+  link,
   url: process.env["CHIPS_URL"],
-  name: config.name ?? "Hermes",
+  name,
   software: "chips-hermes 0.1.0",
   wants: ["agents"],
   onCode: (code) => log(`Allow this harness in Chips: ${code}`),
@@ -88,6 +72,17 @@ const bridge = new Bridge({
 });
 await bridge.start();
 log(`answering for ${config.agents.map((agent) => agent.name).join(", ")} through Hermes`);
+
+// Its first words in the room it joined, once: the card that followed its link waits for them.
+const main = bridge.mainAgentId;
+await helloOnce(joined, {
+  name,
+  say: (spaceId) =>
+    (main === undefined ? chips : chips.as(main)).post({
+      spaceId,
+      text: `Hi, I'm ${config.agents[0]?.name ?? name}, here through Hermes. Ask me anything.`,
+    }),
+}).catch((error: unknown) => log(`hello not said: ${String(error)}`));
 
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.on(signal, () => {

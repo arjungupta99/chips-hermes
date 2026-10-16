@@ -5,8 +5,8 @@
 
 import { strict as assert } from "node:assert";
 import { it } from "node:test";
-import { formatReport, runConformance } from "@chips/conformance";
-import { type Chips, connect } from "@chips/harness";
+import { formatReport, runConformance } from "@chipschat/conformance";
+import { type Chips, connect } from "@chipschat/harness";
 import { Bridge } from "../src/bridge.ts";
 import { startFakeHermes } from "./fake-hermes.ts";
 

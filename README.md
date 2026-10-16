@@ -55,14 +55,18 @@ through Chips: it would act on everything without asking anyone.
 
    Each key is read from the environment variable `keyEnv` names.
 
-3. Join Chips once, with a link a person makes in Chips (Add harness):
+3. Join Chips once, with a link from Chips's gallery (Add an agent → Hermes), whose card gives
+   this line with the link in it:
 
    ```
-   CHIPS_JOIN_LINK='chips://join?…' API_SERVER_KEY=… npm start
+   cd ~/Work/chips-hermes && CHIPS_JOIN_LINK='<link>' API_SERVER_KEY=<the API server's key> npm start
    ```
 
-   Or with `CHIPS_URL` and a code a person allows. The key Chips gives it is kept, so later starts
-   need only the Hermes keys.
+   Or with `CHIPS_URL` and a code a person allows. Before it takes the link up, which works once,
+   it checks the config is there, each key is filled in (not the card's `…`), and Hermes answers;
+   anything missing stops it with what to do, and the link is still good. Joined, its Main agent
+   says hello in its room once, which the card waits for. The key Chips gives it is kept, so later
+   starts need only the Hermes keys; a new link from Chips replaces it.
 
 ## Tests
 

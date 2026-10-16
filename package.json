@@ -14,12 +14,12 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@chips/harness": "file:vendor/chips-harness-0.0.0.tgz",
-    "@chips/protocol": "file:vendor/chips-protocol-0.0.0.tgz",
+    "@chipschat/harness": "file:vendor/chipschat-harness-0.0.0.tgz",
+    "@chipschat/protocol": "file:vendor/chipschat-protocol-0.0.0.tgz",
     "tsx": "4.21.0"
   },
   "devDependencies": {
-    "@chips/conformance": "file:vendor/chips-conformance-0.0.0.tgz",
+    "@chipschat/conformance": "file:vendor/chipschat-conformance-0.0.0.tgz",
     "@types/node": "22.19.0",
     "typescript": "5.9.3"
   }
