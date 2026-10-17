@@ -20,7 +20,7 @@
  */
 
 import type { Agent, Chips, Decision, Run, Speaker } from "@chipschat/harness";
-import { promptFor, sendAnswer } from "@chipschat/harness";
+import { promptFor, SENDING_FILES, sendAnswer } from "@chipschat/harness";
 import { type AgentAsked, createIdGenerator, type MessageNew, type StepKind } from "@chipschat/protocol";
 import { HermesClient, HermesError, type ProfileAddress, type RunEvent, TERMINAL } from "./hermes.js";
 
@@ -62,6 +62,19 @@ export interface BridgeOptions {
   /** How often each gateway is asked whether it is up. */
   readonly healthEveryMs?: number | undefined;
 }
+
+/**
+ * How a file reaches the room, as each run's `instructions`, which Hermes adds to that turn's system
+ * prompt and keeps out of the session. In the turn's words it lost to Hermes's own hint for its API
+ * server, that a file other than a picture can't be sent: "this interface doesn't let me attach HTML
+ * files", and a path (the Chips runs of 17 October 2026). Said here, it holds in a session that
+ * began before, and needs nothing changed in Hermes.
+ */
+export const FILES_HERE =
+  `${SENDING_FILES} Hermes's note that this API server sends only pictures, and shows a MEDIA: tag on ` +
+  "the runs endpoint as text, does not hold for these runs: they come from Chips, whose bridge takes " +
+  "each MEDIA: line out of your answer and attaches that file to your message, whatever its type, up " +
+  "to 100 MB.";
 
 /** Ids for the approvals asked here, made before the ask so Hermes's answer can find its card. */
 const ids = createIdGenerator();
@@ -353,8 +366,7 @@ export class Bridge {
       await this.failed(turn, `${agent.config.name} couldn't open a session in Hermes: ${messageOf(error)}`, true);
       return;
     }
-    const sendsFiles = agent.config.folder !== undefined;
-    let text: string | undefined = promptFor(message, { ...(speakerId === undefined ? {} : { taker: speakerId }), sendsFiles });
+    let text: string | undefined = promptFor(message, speakerId === undefined ? {} : { taker: speakerId });
     for (let round = 0; text !== undefined && !turn.cancelled && !run.over; round += 1) {
       const last = await this.once(turn, session, text, `${run.id}:${round}`);
       if (last === undefined) return;
@@ -376,7 +388,7 @@ export class Bridge {
   private async once(turn: Turn, session: string, text: string, key: string): Promise<RunEvent | undefined> {
     const { agent } = turn;
     try {
-      turn.hermesRun = await agent.client.startRun({ text, sessionId: session, model: agent.config.model, key });
+      turn.hermesRun = await agent.client.startRun({ text, sessionId: session, model: agent.config.model, key, instructions: FILES_HERE });
     } catch (error) {
       await this.failed(turn, `${agent.config.name} couldn't start in Hermes: ${messageOf(error)}`, true);
       return undefined;
@@ -607,13 +619,14 @@ export class Bridge {
     await this.counted(turn, last);
     const output = typeof last["output"] === "string" ? last["output"].trim() : "";
     const answer = output !== "" ? output : turn.reply.trim();
-    // The files its `MEDIA:` lines name go with its words, from its folder (Chips TT-7).
+    // The files its `MEDIA:` lines name go with its words, from its folder (Chips TT-7). With no
+    // folder set none can go, and the post says so rather than show the lines.
     const folder = agent.config.folder;
     const { chips } = this.options;
-    const post =
-      folder === undefined
-        ? { text: answer, uploadIds: [], summary: answer }
-        : await sendAnswer(answer, { folders: [folder], upload: (input) => chips.upload(input) });
+    const post = await sendAnswer(answer, {
+      folders: folder === undefined ? [] : [folder],
+      upload: (input) => chips.upload(input),
+    });
     const reply = post.text;
     if (reply !== "" || post.uploadIds.length > 0) {
       await turn.speaker.post({ spaceId: run.spaceId, runId: run.id, text: reply, uploadIds: post.uploadIds });

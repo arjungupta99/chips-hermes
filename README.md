@@ -18,7 +18,7 @@ Apache-2.0. Not published: a local repository until Chips's SDK is.
 | The thinking bubble's words | `reasoning.available`, `message.interim` |
 | Steps, drawn by kind | `tool.started` / `tool.completed` (by `tool_call_id`, else first in, first out per tool); a sub-agent's `subagent.start` / `subagent.complete` |
 | The reply | `run.completed`'s `output`, else the `message.delta`s |
-| Files in the reply | each `MEDIA:<path>` line of its own in the reply, taken out of the words and sent from `folder` (each turn is told how); a file outside it is refused, and the reply says so |
+| Files in the reply | each `MEDIA:<path>` line of its own in the reply, taken out of the words and sent from `folder`; a file outside it is refused, and the reply says so. Each run is told how in its `instructions`, which Hermes adds to the system prompt, over its own hint that its API server sends only pictures |
 | Cost | the run's tokens; a sub-agent's `cost_usd` as its step's share |
 | An approval card | `approval.request` → `POST …/approval`: once, session or always where Hermes offers it, else once; deny for a no. One answered in Hermes's own tools is settled in Chips (ADR 0079) |
 | Stop | `POST …/stop` |
@@ -64,28 +64,8 @@ hasn't been tried through Chips yet.
 
    Each key is read from the environment variable `keyEnv` names. `folder` is where Hermes works
    (the gateway's `MESSAGING_CWD`), for the config or one agent: the files an answer sends go to
-   the room from there and from nowhere else. Without it an agent isn't told how to send a file,
-   and answers with a path, which nobody in the room can open.
-
-   Hermes's own hint for its API server tells the agent the opposite: that a `MEDIA:` tag for
-   anything but a picture reaches nobody, and to give the path instead. An agent believes its
-   system prompt over a turn's note (the Chips runs of 17 October 2026: "this interface doesn't let
-   me attach HTML files"), so replace that hint in `~/.hermes/config.yaml`, keeping the rest of it:
-
-   ```yaml
-   platform_hints:
-     api_server:
-       replace: >-
-         You're responding through an API server. The rendering layer is unknown — assume plain
-         text. No markdown formatting (no asterisks, bullets, headers, code fences). Treat this
-         like a conversation, not a document. Keep responses brief and natural. File delivery:
-         these runs come from Chips, whose bridge takes each MEDIA:/absolute/path line of its own
-         out of your answer and attaches that file to your message, whatever its type, up to
-         100 MB. Send a file that way; a plain path reaches nobody.
-   ```
-
-   Hermes keeps a session's system prompt from its first turn, so a room whose session began
-   before the change keeps the old hint; a new room has the new one.
+   the room from there and from nowhere else. Without it no file can go: the bridge says so at each
+   start, and a post that names one says it was not attached.
 
 3. Join Chips once, with a link from Chips's gallery (Add an agent → Hermes), whose card gives
    this line with the link in it:

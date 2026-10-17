@@ -32,6 +32,8 @@ export interface Started {
   readonly input: string;
   readonly sessionId: string | undefined;
   readonly model: string | undefined;
+  /** What the run said to add to the turn's system prompt. */
+  readonly instructions: string | undefined;
   readonly profile: string;
   readonly idempotencyKey: string | undefined;
 }
@@ -207,6 +209,7 @@ export async function startFakeHermes(options: { askFirst?: boolean } = {}): Pro
           input: run.input,
           sessionId: typeof body["session_id"] === "string" ? body["session_id"] : undefined,
           model: typeof body["model"] === "string" ? body["model"] : undefined,
+          instructions: typeof body["instructions"] === "string" ? body["instructions"] : undefined,
           profile,
           idempotencyKey: request.headers["idempotency-key"] as string | undefined,
         });

@@ -94,6 +94,8 @@ export class HermesClient {
     readonly sessionId: string;
     readonly model?: string | undefined;
     readonly key: string;
+    /** Added to the system prompt of this turn only: Hermes keeps it out of the session. */
+    readonly instructions?: string | undefined;
   }): Promise<string> {
     const started = await this.call(
       "POST",
@@ -102,6 +104,7 @@ export class HermesClient {
         input: input.text,
         session_id: input.sessionId,
         ...(input.model === undefined ? {} : { model: input.model }),
+        ...(input.instructions === undefined ? {} : { instructions: input.instructions }),
       },
       { "Idempotency-Key": input.key.slice(0, 255) },
     );

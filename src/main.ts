@@ -37,6 +37,14 @@ try {
   process.stderr.write(`${error.message}\n`);
   process.exit(1);
 }
+// No folder is no file sent: each one an agent names is refused in its post. Said at every start.
+for (const agent of config.agents) {
+  if (agent.folder === undefined) {
+    process.stdout.write(
+      `${agent.name} has no folder, so no file it names can be sent: set "folder" in ${configPath} to where Hermes works (its MESSAGING_CWD).\n`,
+    );
+  }
+}
 const name = config.name ?? "Hermes";
 const folder = dirname(configPath);
 const statePath = join(folder, "sessions.json");

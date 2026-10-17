@@ -171,16 +171,22 @@ describe("the files an answer names", () => {
       attachments.map((each) => each.filename),
       ["page.html"],
     );
-    assert.match(hermes.started[0]?.input ?? "", /MEDIA:<path> on a line of its own/, "it was told how");
+    // Told in the run's instructions, which Hermes puts in the system prompt over its own hint
+    // that the API server sends only pictures; in the turn's words it lost to that hint.
+    const told = hermes.started[0]?.instructions ?? "";
+    assert.match(told, /MEDIA:<path> on a line of its own/, "it was told how");
+    assert.match(told, /does not hold for these runs/, "and that Hermes's own hint is wrong here");
+    assert.doesNotMatch(hermes.started[0]?.input ?? "", /MEDIA:<path>/, "once");
   });
 
-  it("is told nothing of files, and its words go as they are, with no folder set", async () => {
+  it("says in the room why no file went, with no folder set, rather than show the lines", async () => {
     const { chips, hermes } = await rig();
     await chips.say("send the page");
     const started = await sent(chips, "run.started");
     const words = await sent(chips, "message.post", (event) => event.run_id === started.run_id);
-    assert.equal(words.payload["text"], "The page is ready.\n\nMEDIA:page.html\nMEDIA:../secret.txt");
-    assert.doesNotMatch(hermes.started[0]?.input ?? "", /MEDIA:<path>/);
+    const why = "was not attached: this agent has no folder its files are sent from.)";
+    assert.equal(words.payload["text"], `The page is ready.\n\n(page.html ${why}\n\n(secret.txt ${why}`);
+    assert.match(hermes.started[0]?.instructions ?? "", /MEDIA:<path>/, "told how all the same");
   });
 });
 
