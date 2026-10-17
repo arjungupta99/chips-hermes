@@ -19,6 +19,8 @@
  * neither is claimed.
  */
 
+import { mkdirSync } from "node:fs";
+import { join } from "node:path";
 import type { Agent, Chips, Decision, Run, Speaker } from "@chipschat/harness";
 import { promptFor, SENDING_FILES, sendAnswer } from "@chipschat/harness";
 import { type AgentAsked, createIdGenerator, type MessageNew, type StepKind } from "@chipschat/protocol";
@@ -31,6 +33,8 @@ export interface AgentConfig {
   readonly address: ProfileAddress;
   /** The environment variable its key was read from, to name when Hermes refuses it. */
   readonly keyEnv?: string | undefined;
+  /** Where its key was read from: `$API_SERVER_KEY`, or Hermes's own `.env`. */
+  readonly keyFrom?: string | undefined;
   /** The model each of its runs asks for, when not the profile's own. */
   readonly model?: string | undefined;
   /**
@@ -47,6 +51,8 @@ export interface BridgeState {
    * its Chips id in the place of the key.
    */
   sessions: Record<string, string>;
+  /** Chips agent id → the folder it works in, named after it the first time and kept. */
+  folders?: Record<string, string>;
 }
 
 export interface BridgeOptions {
@@ -54,6 +60,11 @@ export interface BridgeOptions {
   readonly agents: readonly AgentConfig[];
   /** The harness's own room, where its Main agent lives. */
   readonly home?: string | undefined;
+  /**
+   * Where each agent gets a folder of its own, unless the config names one `folder` for them all.
+   * None, and an agent has no folder: no file it names is sent.
+   */
+  readonly folders?: string | undefined;
   readonly state: BridgeState;
   readonly saveState: (state: BridgeState) => void;
   /** How to reach a profile: its gateway, unless a test hands in a client of its own. */
@@ -75,6 +86,26 @@ export const FILES_HERE =
   "the runs endpoint as text, does not hold for these runs: they come from Chips, whose bridge takes " +
   "each MEDIA: line out of your answer and attaches that file to your message, whatever its type, up " +
   "to 100 MB.";
+
+/** Each run's instructions: how a file reaches the room, and where the agent's own folder is. */
+export function instructionsFor(folder: string | undefined): string {
+  return folder === undefined
+    ? FILES_HERE
+    : `${FILES_HERE} Your own folder is ${folder}: make and keep your files there, and run your commands from there.`;
+}
+
+/** A folder under `root` named after an agent, `-2` and on when another agent has that one. */
+export function freeFolder(root: string, name: string, taken: readonly string[]): string {
+  const slug =
+    name
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "") || "agent";
+  for (let count = 1; ; count += 1) {
+    const folder = join(root, count === 1 ? slug : `${slug}-${count}`);
+    if (!taken.includes(folder)) return folder;
+  }
+}
 
 /** Ids for the approvals asked here, made before the ask so Hermes's answer can find its card. */
 const ids = createIdGenerator();
@@ -161,6 +192,8 @@ interface Turn {
   readonly allowed: string[];
   /** A person's interrupt stopped the Hermes run: the turn goes on with their words. */
   interrupted: boolean;
+  /** The folder the agent works in and its files are sent from, said in each run's instructions. */
+  folder?: string | undefined;
 }
 
 export class Bridge {
@@ -168,6 +201,8 @@ export class Bridge {
   private readonly rooms = new Map<string, Room>();
   /** Every Chips agent of the harness's, configured here or not. */
   private ours = new Set<string>();
+  /** The harness's agents' names, by Chips id, for the folders named after them. */
+  private readonly names = new Map<string, string>();
   private readonly log: (line: string) => void;
   private health: ReturnType<typeof setInterval> | undefined;
 
@@ -255,7 +290,38 @@ export class Bridge {
       spaceId: asked.space_id,
     });
     this.ours.add(agent.agentId);
+    this.names.set(agent.agentId, agent.name);
     this.log(`${agent.name} made${agent.attached === false ? `, not in the room: ${agent.why ?? "too late"}` : ""}`);
+  }
+
+  /** An agent's name, from Chips's list when it isn't known yet. */
+  private async nameOf(agentId: string, otherwise: string): Promise<string> {
+    if (!this.names.has(agentId)) {
+      const listed = await this.options.chips.agents.list().catch(() => []);
+      for (const agent of listed) this.names.set(agent.agentId, agent.name);
+    }
+    return this.names.get(agentId) ?? otherwise;
+  }
+
+  /**
+   * The folder an agent works in and sends its files from: the one the config names for them all
+   * (`folder`, as it was), else one of its own under `folders`, named after it the first time it
+   * takes a turn and kept, so a rename keeps it. Every agent once shared one folder, and a team's
+   * files overwrote a one-agent room's game (Chips TT-16); and the one folder had to be Hermes's
+   * own working folder, which a plain Hermes doesn't set (the setup audit, 17 October 2026).
+   */
+  private folderOf(agent: Running, agentId: string, name: string): string | undefined {
+    if (agent.config.folder !== undefined) return agent.config.folder;
+    const { folders: root, state } = this.options;
+    if (root === undefined) return undefined;
+    const kept = state.folders?.[agentId];
+    const folder = kept ?? freeFolder(root, name, Object.values(state.folders ?? {}));
+    mkdirSync(folder, { recursive: true });
+    if (kept === undefined) {
+      state.folders = { ...state.folders, [agentId]: folder };
+      this.options.saveState(state);
+    }
+    return folder;
   }
 
   /** Trouble while a profile's gateway doesn't answer, and fine once all do (ADR 0083). */
@@ -296,7 +362,10 @@ export class Bridge {
     if (own !== undefined) return own;
     if (taker !== this.options.chips.harnessId && !this.ours.has(taker)) {
       const listed = await this.options.chips.agents.list().catch(() => []);
-      for (const agent of listed) this.ours.add(agent.agentId);
+      for (const agent of listed) {
+        this.ours.add(agent.agentId);
+        this.names.set(agent.agentId, agent.name);
+      }
     }
     return taker === this.options.chips.harnessId || this.ours.has(taker) ? this.agents[0] : undefined;
   }
@@ -366,6 +435,8 @@ export class Bridge {
       await this.failed(turn, `${agent.config.name} couldn't open a session in Hermes: ${messageOf(error)}`, true);
       return;
     }
+    const name = speakerId === undefined ? agent.config.name : await this.nameOf(speakerId, agent.config.name);
+    turn.folder = this.folderOf(agent, speakerId ?? agent.agentId, name);
     let text: string | undefined = promptFor(message, speakerId === undefined ? {} : { taker: speakerId });
     for (let round = 0; text !== undefined && !turn.cancelled && !run.over; round += 1) {
       const last = await this.once(turn, session, text, `${run.id}:${round}`);
@@ -388,7 +459,7 @@ export class Bridge {
   private async once(turn: Turn, session: string, text: string, key: string): Promise<RunEvent | undefined> {
     const { agent } = turn;
     try {
-      turn.hermesRun = await agent.client.startRun({ text, sessionId: session, model: agent.config.model, key, instructions: FILES_HERE });
+      turn.hermesRun = await agent.client.startRun({ text, sessionId: session, model: agent.config.model, key, instructions: instructionsFor(turn.folder) });
     } catch (error) {
       await this.failed(turn, `${agent.config.name} couldn't start in Hermes: ${messageOf(error)}`, true);
       return undefined;
@@ -621,7 +692,7 @@ export class Bridge {
     const answer = output !== "" ? output : turn.reply.trim();
     // The files its `MEDIA:` lines name go with its words, from its folder (Chips TT-7). With no
     // folder set none can go, and the post says so rather than show the lines.
-    const folder = agent.config.folder;
+    const { folder } = turn;
     const { chips } = this.options;
     const post = await sendAnswer(answer, {
       folders: folder === undefined ? [] : [folder],

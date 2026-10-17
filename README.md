@@ -18,7 +18,7 @@ Apache-2.0. Not published: a local repository until Chips's SDK is.
 | The thinking bubble's words | `reasoning.available`, `message.interim` |
 | Steps, drawn by kind | `tool.started` / `tool.completed` (by `tool_call_id`, else first in, first out per tool); a sub-agent's `subagent.start` / `subagent.complete` |
 | The reply | `run.completed`'s `output`, else the `message.delta`s |
-| Files in the reply | each `MEDIA:<path>` line of its own in the reply, taken out of the words and sent from `folder`; a file outside it is refused, and the reply says so. Each run is told how in its `instructions`, which Hermes adds to the system prompt, over its own hint that its API server sends only pictures |
+| Files in the reply | each `MEDIA:<path>` line of its own in the reply, taken out of the words and sent from the agent's folder; a file outside it is refused, and the reply says so. Each run is told how in its `instructions`, which Hermes adds to the system prompt, over its own hint that its API server sends only pictures |
 | Cost | the run's tokens; a sub-agent's `cost_usd` as its step's share |
 | An approval card | `approval.request` → `POST …/approval`: once, session or always where Hermes offers it, else once; deny for a no. One answered in Hermes's own tools is settled in Chips (ADR 0079) |
 | Stop | `POST …/stop` |
@@ -56,29 +56,39 @@ hasn't been tried through Chips yet.
 
    Then `hermes gateway`. It listens on `127.0.0.1:8642`.
 
-2. Name the agents in `~/.chips-hermes/config.json` (see `config.example.json`). Each agent is one
-   of three:
-   - the default profile;
-   - a profile under `/p/<profile>`, with `gateway.multiplex_profiles` on and that profile's own key;
-   - a profile's own gateway at a `url` of its own.
-
-   Each key is read from the environment variable `keyEnv` names. `folder` is where Hermes works
-   (the gateway's `MESSAGING_CWD`), for the config or one agent: the files an answer sends go to
-   the room from there and from nowhere else. Without it no file can go: the bridge says so at each
-   start, and a post that names one says it was not attached.
+2. Once, in this repository: `npm install`.
 
 3. Join Chips once, with a link from Chips's gallery (Add an agent → Hermes), whose card gives
    this line with the link in it:
 
    ```
-   cd ~/Work/chips-hermes && CHIPS_JOIN_LINK='<link>' API_SERVER_KEY=<the API server's key> npm start
+   cd ~/Work/chips-hermes && CHIPS_JOIN_LINK='<link>' npm start
    ```
 
    Or with `CHIPS_URL` and a code a person allows. Before it takes the link up, which works once,
-   it checks the config is there, each key is filled in (not the card's `…`), and Hermes answers
-   and takes the key (`/v1/models`, since `/health` needs none); anything missing stops it with what to do, and the link is still good. Joined, its Main agent
-   says hello in its room once, which the card waits for. The key Chips gives it is kept, so later
-   starts need only the Hermes keys; a new link from Chips replaces it.
+   it checks there is a key, and that Hermes answers and takes it (`/v1/models`, since `/health`
+   needs none). Anything missing stops it with what to do, and the link is still good. Joined, its
+   Main agent says hello in its room once, which the card waits for. The key Chips gives it is
+   kept, so later starts need nothing; a new link from Chips replaces it.
+
+That is all most people need: with no config the bridge is Hermes's default profile, and the key is
+the `API_SERVER_KEY` in `$API_SERVER_KEY` if set, else in Hermes's own `.env` (`$HERMES_HOME/.env`
+when `HERMES_HOME` is set).
+
+**Folders.** Each agent gets a folder of its own, `~/chips-hermes/agents/<its name>`, made the
+first time it is spoken to and kept by its Chips agent after a rename. Each run tells the agent it
+is its folder, in the run's `instructions`. The files an answer sends go to the room from there and
+from nowhere else.
+
+**More than one agent.** Name them in `~/.chips-hermes/config.json` (see `config.example.json`).
+Each agent is one of three:
+- the default profile;
+- a profile under `/p/<profile>`, with `gateway.multiplex_profiles` on and that profile's own key;
+- a profile's own gateway at a `url` of its own.
+
+Each key is read from the variable `keyEnv` names, in the environment or Hermes's `.env`.
+`folders` moves where the agents' folders are made. `folder`, for the config or one agent, puts
+the agents it covers in one folder they share instead.
 
 ## Tests
 

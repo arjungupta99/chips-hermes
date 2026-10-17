@@ -1,7 +1,7 @@
 {
   "name": "Hermes",
   "url": "http://127.0.0.1:8642",
-  "folder": "~/chips-hermes/work",
+  "folders": "~/chips-hermes/agents",
   "agents": [
     { "name": "Hermes", "profile": "default", "keyEnv": "API_SERVER_KEY" },
     { "name": "Alice", "profile": "alice", "keyEnv": "HERMES_ALICE_KEY" }

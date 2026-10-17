@@ -10,7 +10,7 @@ import { join } from "node:path";
 import { afterEach, describe, it } from "node:test";
 import { type FakeChips, type StoredEvent, startFakeChips } from "@chipschat/conformance";
 import { type Chips, connect, type Decision } from "@chipschat/harness";
-import { Bridge, type BridgeState, choiceOf, keyOf } from "../src/bridge.ts";
+import { Bridge, type BridgeState, choiceOf, freeFolder, keyOf } from "../src/bridge.ts";
 import { type FakeHermes, startFakeHermes } from "./fake-hermes.ts";
 
 interface Rig {
@@ -30,7 +30,7 @@ afterEach(async () => {
 const AGENT = { name: "Hermes", profile: "default" } as const;
 
 async function rig(
-  options: { state?: BridgeState; chips?: FakeChips; hermes?: FakeHermes; profile?: string; model?: string; folder?: string } = {},
+  options: { state?: BridgeState; chips?: FakeChips; hermes?: FakeHermes; profile?: string; model?: string; folder?: string; folders?: string } = {},
 ): Promise<Rig> {
   const chips = options.chips ?? (await startFakeChips({ capabilities: ["agents"] }));
   if (options.chips === undefined) open.push(() => chips.close());
@@ -50,6 +50,7 @@ async function rig(
       },
     ],
     home: chips.address.spaceId,
+    ...(options.folders === undefined ? {} : { folders: options.folders }),
     state,
     saveState: () => undefined,
     healthEveryMs: 50,
@@ -177,6 +178,33 @@ describe("the files an answer names", () => {
     assert.match(told, /MEDIA:<path> on a line of its own/, "it was told how");
     assert.match(told, /does not hold for these runs/, "and that Hermes's own hint is wrong here");
     assert.doesNotMatch(hermes.started[0]?.input ?? "", /MEDIA:<path>/, "once");
+  });
+
+  it("gives an agent a folder of its own, says where in the run's instructions, and sends from it", async () => {
+    // Every agent shared one folder, which had to be Hermes's own working folder: a team overwrote a
+    // one-agent room's game (TT-16), and a plain Hermes works in the home folder (setup audit, S11).
+    const root = mkdtempSync(join(tmpdir(), "chips-hermes-agents-"));
+    open.push(async () => rmSync(root, { recursive: true, force: true }));
+    const own = join(root, "hermes");
+    mkdirSync(own, { recursive: true });
+    writeFileSync(join(own, "page.html"), "<p>play</p>");
+    const { chips, hermes, state, agentId } = await rig({ folders: root });
+    await chips.say("send the page");
+    const started = await sent(chips, "run.started");
+    const words = await sent(chips, "message.post", (event) => event.run_id === started.run_id);
+    const attachments = words.payload["attachments"] as { filename: string }[];
+    assert.deepEqual(
+      attachments.map((each) => each.filename),
+      ["page.html"],
+    );
+    assert.match(hermes.started[0]?.instructions ?? "", new RegExp(`Your own folder is ${own}: make and keep your files there`));
+    assert.equal(state.folders?.[agentId], own, "kept, so a rename keeps it");
+  });
+
+  it("names a folder after the agent, and the next one with the same name -2", () => {
+    assert.equal(freeFolder("/r", "Hal Jordan", []), "/r/hal-jordan");
+    assert.equal(freeFolder("/r", "Hal Jordan", ["/r/hal-jordan"]), "/r/hal-jordan-2");
+    assert.equal(freeFolder("/r", "!!!", []), "/r/agent");
   });
 
   it("says in the room why no file went, with no folder set, rather than show the lines", async () => {

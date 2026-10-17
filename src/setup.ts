@@ -15,6 +15,8 @@ import { HermesClient } from "./hermes.js";
 export interface Config {
   readonly name?: string;
   readonly agents: readonly AgentConfig[];
+  /** Where each agent gets a folder of its own, unless the config names one `folder` for them all. */
+  readonly folders: string;
 }
 
 /** Something to put right before the bridge starts, said so a person can. */
@@ -26,6 +28,25 @@ export const STILL_GOOD = "The link is still good: run the same command again on
 
 const EXAMPLE = '{ "agents": [{ "name": "Hermes", "profile": "default", "keyEnv": "API_SERVER_KEY" }] }';
 
+/** With no config, the one agent most people have: Hermes's default profile, on its own port. */
+const PLAIN = { agents: [{ name: "Hermes", profile: "default", keyEnv: "API_SERVER_KEY" }] };
+
+/** Hermes's own settings file, where its API server's key is (`hermes gateway` reads it). */
+export function hermesEnvPath(env: NodeJS.ProcessEnv = process.env): string {
+  return resolve(env["HERMES_HOME"] ?? resolve(homedir(), ".hermes"), ".env");
+}
+
+/** A value from Hermes's own `.env`, for a key the environment doesn't give. */
+function fromHermes(name: string, env: NodeJS.ProcessEnv): string | undefined {
+  const path = hermesEnvPath(env);
+  if (!existsSync(path)) return undefined;
+  for (const line of readFileSync(path, "utf8").split("\n")) {
+    const match = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$/.exec(line);
+    if (match?.[1] === name) return match[2]?.replace(/^(["'])(.*)\1$/, "$2");
+  }
+  return undefined;
+}
+
 /** A folder the config names, `~` at the home of the user the bridge runs as. */
 function folderOf(said: unknown): string | undefined {
   if (typeof said !== "string" || said === "") return undefined;
@@ -34,10 +55,14 @@ function folderOf(said: unknown): string | undefined {
 
 /** The config at `path`, each agent with its key from the environment. */
 export function readConfig(path: string, env: NodeJS.ProcessEnv = process.env): Config {
-  if (!existsSync(path)) {
-    throw new SetupError(`There is no config at ${path}. Write ${EXAMPLE} there. ${STILL_GOOD}`);
-  }
-  const raw = JSON.parse(readFileSync(path, "utf8")) as { name?: unknown; url?: unknown; folder?: unknown; agents?: unknown };
+  // No config is Hermes's default profile: a person who runs Hermes need write nothing first.
+  const raw = (existsSync(path) ? JSON.parse(readFileSync(path, "utf8")) : PLAIN) as {
+    name?: unknown;
+    url?: unknown;
+    folder?: unknown;
+    folders?: unknown;
+    agents?: unknown;
+  };
   const url = typeof raw.url === "string" ? raw.url : "http://127.0.0.1:8642";
   const folder = folderOf(raw.folder);
   if (!Array.isArray(raw.agents) || raw.agents.length === 0) {
@@ -45,17 +70,20 @@ export function readConfig(path: string, env: NodeJS.ProcessEnv = process.env): 
   }
   const agents = (raw.agents as Record<string, unknown>[]).map((agent) => {
     const keyEnv = typeof agent["keyEnv"] === "string" ? agent["keyEnv"] : "API_SERVER_KEY";
-    const key = env[keyEnv];
+    // The environment's, else the one Hermes's API server was started with, in Hermes's own file.
+    const fromEnv = filledIn(env[keyEnv]);
+    const key = fromEnv ? env[keyEnv] : fromHermes(keyEnv, env);
     const own = folderOf(agent["folder"]) ?? folder;
     if (typeof agent["name"] !== "string") throw new SetupError(`Each agent in ${path} has a name. ${STILL_GOOD}`);
     if (!filledIn(key)) {
       throw new SetupError(
-        `${agent["name"]}'s key isn't in $${keyEnv}: set it to the key Hermes's API server was started with, not the … from the command. ${STILL_GOOD}`,
+        `${agent["name"]}'s key isn't in $${keyEnv} or ${hermesEnvPath(env)}. Turn on Hermes's API server: add API_SERVER_ENABLED=true and API_SERVER_KEY=<a long random key> to ${hermesEnvPath(env)}, and start \`hermes gateway\` again. ${STILL_GOOD}`,
       );
     }
     return {
       name: agent["name"],
       keyEnv,
+      keyFrom: fromEnv ? `$${keyEnv}` : hermesEnvPath(env),
       address: {
         url: typeof agent["url"] === "string" ? agent["url"] : url,
         key,
@@ -65,7 +93,11 @@ export function readConfig(path: string, env: NodeJS.ProcessEnv = process.env): 
       ...(own === undefined ? {} : { folder: own }),
     };
   });
-  return { ...(typeof raw.name === "string" ? { name: raw.name } : {}), agents };
+  return {
+    ...(typeof raw.name === "string" ? { name: raw.name } : {}),
+    agents,
+    folders: folderOf(raw.folders) ?? resolve(homedir(), "chips-hermes", "agents"),
+  };
 }
 
 /** Hermes answering for each agent, and taking its key, before the link is spent. */
@@ -83,7 +115,7 @@ export async function checkHermes(
     }
     if (!(await client.takesKey())) {
       throw new SetupError(
-        `Hermes at ${agent.address.url} refused ${agent.name}'s key in $${agent.keyEnv ?? "API_SERVER_KEY"}: give it the API_SERVER_KEY its API server was started with. ${STILL_GOOD}`,
+        `Hermes at ${agent.address.url} refused ${agent.name}'s key, from ${agent.keyFrom ?? `$${agent.keyEnv ?? "API_SERVER_KEY"}`}: it has to be the API_SERVER_KEY Hermes's API server was started with. Start \`hermes gateway\` again after changing it. ${STILL_GOOD}`,
       );
     }
   }

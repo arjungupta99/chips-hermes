@@ -21,7 +21,7 @@ describe("Hermes's card, from a link to its hello", { skip, timeout: 180_000 }, 
   let hermes: FakeHermes;
   let home: string;
   let card: CardLink;
-  /** The card's command with the key filled in, as a person fills it. */
+  /** The card's command as a person runs it: a card that still asks for the key gets it filled in. */
   const filled = (command: string) => command.replace("API_SERVER_KEY=…", `API_SERVER_KEY=${hermes.key}`);
   const kept = () =>
     Object.values(JSON.parse(readFileSync(join(home, ".config/chips/harness-keys.json"), "utf8")) as Record<string, string>).map(
@@ -49,20 +49,22 @@ describe("Hermes's card, from a link to its hello", { skip, timeout: 180_000 }, 
   });
 
   it("stops on each thing not set up, and leaves the link good", async () => {
-    await stopped(card.command, /There is no config at .*\.chips-hermes\/config\.json/);
+    // No config is Hermes's default profile; its key is the API server's, from Hermes's own .env.
+    await stopped(card.command, /Hermes's key isn't in \$API_SERVER_KEY or .*\.hermes\/\.env\. Turn on Hermes's API server/);
+    // Pointed at the fake Hermes, which the default profile's port isn't.
     mkdirSync(join(home, ".chips-hermes"));
     writeFileSync(
       join(home, ".chips-hermes", "config.json"),
       JSON.stringify({ url: hermes.url, agents: [{ name: "Hermes", profile: "default", keyEnv: "API_SERVER_KEY" }] }),
     );
-    await stopped(card.command, /Hermes's key isn't in \$API_SERVER_KEY/);
+    mkdirSync(join(home, ".hermes"));
+    writeFileSync(join(home, ".hermes", ".env"), `API_SERVER_ENABLED=true\nAPI_SERVER_KEY=${hermes.key}\n`);
     hermes.up = false;
     await stopped(filled(card.command), /Hermes isn't answering for Hermes at http:\/\/127\.0\.0\.1:\d+/);
     hermes.up = true;
-    await stopped(
-      card.command.replace("API_SERVER_KEY=…", "API_SERVER_KEY=not-the-servers-key"),
-      /Hermes at http:\/\/127\.0\.0\.1:\d+ refused Hermes's key in \$API_SERVER_KEY/,
-    );
+    writeFileSync(join(home, ".hermes", ".env"), "API_SERVER_ENABLED=true\nAPI_SERVER_KEY=not-the-servers-key\n");
+    await stopped(filled(card.command), /Hermes at http:\/\/127\.0\.0\.1:\d+ refused Hermes's key, from .*\.hermes\/\.env: it has to be the API_SERVER_KEY/);
+    writeFileSync(join(home, ".hermes", ".env"), `API_SERVER_ENABLED=true\nAPI_SERVER_KEY=${hermes.key}\n`);
   });
 
   it("joins with what the card grants, and says hello once in its room", async () => {
