@@ -47,7 +47,7 @@ const joined = await joinChips({
   url: process.env["CHIPS_URL"],
   name,
   software: "chips-hermes 0.1.0",
-  wants: ["agents"],
+  wants: ["agents", "new_agents"],
   onCode: (code) => log(`Allow this harness in Chips: ${code}`),
 });
 

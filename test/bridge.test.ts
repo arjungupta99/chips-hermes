@@ -103,6 +103,41 @@ describe("its Main agent (Chips ADR 0183)", () => {
   });
 });
 
+// With its one agent Main, a group room could have none of it (Chips ON-12).
+describe("a new agent a person asks for (Chips ADR 0108)", () => {
+  it("joins the room it was asked for, once, however often the ask is heard", async () => {
+    const chips = await startFakeChips({ capabilities: ["agents", "new_agents"] });
+    open.push(() => chips.close());
+    const { client, agentId } = await rig({ chips });
+    const room = await chips.openRoom("Plans");
+    const { askId } = await chips.askForAgent(room, "Nova");
+    await sent(chips, "membership.added", (event) => event.payload["made_for"] === askId);
+    const made = (await client.agents.list()).filter((agent) => agent.agentId !== agentId);
+    assert.deepEqual(
+      made.map((agent) => [agent.name, agent.lead, agent.spaces]),
+      [["Nova", false, [room]]],
+    );
+  });
+
+  it("answers in a session of its own, beside another asked for in the same room", async () => {
+    const chips = await startFakeChips({ capabilities: ["agents", "new_agents"] });
+    open.push(() => chips.close());
+    const { client, agentId, hermes, state } = await rig({ chips });
+    const room = await chips.openRoom("Plans");
+    for (const name of ["Nova", "Vega"]) {
+      const { askId } = await chips.askForAgent(room, name);
+      await sent(chips, "membership.added", (event) => event.payload["made_for"] === askId);
+    }
+    const made = (await client.agents.list()).filter((agent) => agent.agentId !== agentId).map((agent) => agent.agentId);
+    await chips.say("summarise the notes", room);
+    await until(() => chips.workspace.log.filter((event) => event.type === "run.completed").length === 2);
+    const took = chips.workspace.log.filter((event) => event.type === "run.started").map((event) => event.actor.id);
+    assert.deepEqual([...took].sort(), [...made].sort(), "each took its turn as itself");
+    assert.equal(new Set(hermes.started.map((run) => run.sessionId)).size, 2, "two Hermes sessions");
+    assert.deepEqual(Object.keys(state.sessions).sort(), made.map((id) => `${id}|${room}`).sort());
+  });
+});
+
 describe("a turn", () => {
   it("is a run: a status, a step drawn by its kind, the words in the room, its tokens, and the end", async () => {
     const { chips, agentId, hermes } = await rig({ model: "heron-2" });

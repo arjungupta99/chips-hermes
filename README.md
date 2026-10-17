@@ -5,6 +5,8 @@ on Hermes's own API server.
 - Each Hermes profile you name is a Chips agent. The first is the harness's Main agent.
 - Each Chips room an agent is in is a Hermes session of its profile, made the first time somebody
   there speaks to it.
+- A new agent a person asks for in a room (Add, then a new one) runs on the first profile, in a
+  session of its own.
 
 Apache-2.0. Not published: a local repository until Chips's SDK is.
 

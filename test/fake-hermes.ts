@@ -87,7 +87,8 @@ export async function startFakeHermes(options: { askFirst?: boolean } = {}): Pro
 
   const play = async (run: FakeRun) => {
     await sleep(20);
-    const words = run.input;
+    // The person's words, the input's last line: not the room note before them, which may say "ask".
+    const words = run.input.split("\n").at(-1) ?? "";
     if (options.askFirst === true || /\bask\b/.test(words)) {
       emit(run, "tool.started", { tool: "terminal", preview: "npm test", tool_call_id: "call_1" });
       const choice = await asked(run, {

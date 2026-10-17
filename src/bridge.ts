@@ -2,9 +2,9 @@
  * Hermes Agent as one Chips harness, on its Runs API. Each configured profile is a Chips agent
  * (ADR 0087), registered by its own key. The first is the harness's Main agent, in the harness's
  * own room in the place of the default agent Chips gave the harness there, and it answers for
- * that default agent, and for any other of the harness's Chips doesn't name here. A room an agent
- * is in is one Hermes session of its profile, made the first time somebody there speaks to it,
- * and kept across restarts.
+ * that default agent, and for any other of the harness's Chips doesn't name here: a new agent a
+ * person asks for in a room (Chips ADR 0108) is one. A room an agent is in is one Hermes session
+ * of its profile, made the first time somebody there speaks to it, and kept across restarts.
  *
  * A message for an agent is a run, the same on both sides:
  * - It starts with `POST /v1/runs`, telling the session what Chips hands over: the room note, what
@@ -21,7 +21,7 @@
 
 import type { Agent, Chips, Decision, Run, Speaker } from "@chipschat/harness";
 import { promptFor } from "@chipschat/harness";
-import { createIdGenerator, type MessageNew, type StepKind } from "@chipschat/protocol";
+import { type AgentAsked, createIdGenerator, type MessageNew, type StepKind } from "@chipschat/protocol";
 import { HermesClient, HermesError, type ProfileAddress, type RunEvent, TERMINAL } from "./hermes.js";
 
 export interface AgentConfig {
@@ -37,7 +37,10 @@ export interface AgentConfig {
 
 /** What the bridge keeps across restarts beside the SDK's own store. */
 export interface BridgeState {
-  /** `<agent key>|<space id>` → the Hermes session that room is. */
+  /**
+   * `<agent key>|<space id>` → the Hermes session that room is; for an agent not configured here,
+   * its Chips id in the place of the key.
+   */
   sessions: Record<string, string>;
 }
 
@@ -106,6 +109,8 @@ interface Asked {
 }
 
 interface Room {
+  /** Which agent's session in which room: its key in `BridgeState.sessions`. */
+  readonly id: string;
   readonly agent: Running;
   readonly spaceId: string;
   readonly queue: Asked[];
@@ -165,6 +170,9 @@ export class Bridge {
     }
     this.ours = new Set([...known.map((agent) => agent.agentId), ...this.agents.map((agent) => agent.agentId)]);
     chips.on("message.new", (message) => void this.hear(message));
+    chips.on("agent.asked", (asked) => {
+      this.make(asked).catch((error: unknown) => this.log(`a new agent went wrong: ${messageOf(error)}`));
+    });
     await this.sayHowItIs();
     this.health = setInterval(() => void this.sayHowItIs(), this.options.healthEveryMs ?? 30_000);
     this.health.unref();
@@ -214,6 +222,24 @@ export class Bridge {
       .catch((error: unknown) => this.log(`${main.name} stays out of its home: ${String(error)}`));
   }
 
+  /**
+   * A person asked for a new agent in a room (Chips ADR 0108): one of the harness's, keyed by the
+   * ask so an ask heard twice makes one, registered for the room, which Chips puts it in while the
+   * room waits. It answers through the first profile, in a session of its own.
+   */
+  private async make(asked: AgentAsked): Promise<void> {
+    const { chips } = this.options;
+    if (asked.harness_id !== chips.harnessId || asked.space_id === undefined) return;
+    const agent = await chips.agents.register({
+      key: `hermes:asked:${asked.id}`,
+      name: asked.name,
+      madeFor: asked.id,
+      spaceId: asked.space_id,
+    });
+    this.ours.add(agent.agentId);
+    this.log(`${agent.name} made${agent.attached === false ? `, not in the room: ${agent.why ?? "too late"}` : ""}`);
+  }
+
   /** Trouble while a profile's gateway doesn't answer, and fine once all do (ADR 0083). */
   private async sayHowItIs(): Promise<void> {
     for (const agent of this.agents) agent.up = await agent.client.healthy();
@@ -236,7 +262,7 @@ export class Bridge {
     for (const taker of message.for ?? [harnessId]) {
       const agent = await this.runnerOf(taker);
       if (agent === undefined) continue;
-      const room = this.roomOf(agent, spaceId);
+      const room = this.roomOf(agent, taker, spaceId);
       room.queue.push({ message, speakerId: taker === harnessId ? undefined : taker });
       void this.pump(room);
     }
@@ -257,11 +283,16 @@ export class Bridge {
     return taker === this.options.chips.harnessId || this.ours.has(taker) ? this.agents[0] : undefined;
   }
 
-  private roomOf(agent: Running, spaceId: string): Room {
-    const id = `${agent.key}|${spaceId}`;
+  /**
+   * The session a turn is taken in: the profile's own in the room, for its agent or the harness
+   * itself, and one of its own for any other of the harness's, so two in a room are two.
+   */
+  private roomOf(agent: Running, taker: string, spaceId: string): Room {
+    const own = taker === agent.agentId || taker === this.options.chips.harnessId;
+    const id = `${own ? agent.key : taker}|${spaceId}`;
     let room = this.rooms.get(id);
     if (room === undefined) {
-      room = { agent, spaceId, queue: [], busy: false };
+      room = { id, agent, spaceId, queue: [], busy: false };
       this.rooms.set(id, room);
     }
     return room;
@@ -312,7 +343,7 @@ export class Bridge {
     });
     let session: string;
     try {
-      session = await this.sessionFor(agent, spaceId);
+      session = await this.sessionFor(room);
     } catch (error) {
       await this.failed(turn, `${agent.config.name} couldn't open a session in Hermes: ${messageOf(error)}`, true);
       return;
@@ -370,12 +401,11 @@ export class Bridge {
   }
 
   /** The room's session: the one it had, or a new one Hermes makes for it. */
-  private async sessionFor(agent: Running, spaceId: string): Promise<string> {
-    const key = `${agent.key}|${spaceId}`;
-    const kept = this.options.state.sessions[key];
+  private async sessionFor({ id, agent, spaceId }: Room): Promise<string> {
+    const kept = this.options.state.sessions[id];
     if (kept !== undefined) return kept;
     const made = await agent.client.newSession(`Chips room ${spaceId}`);
-    this.options.state.sessions[key] = made;
+    this.options.state.sessions[id] = made;
     this.options.saveState(this.options.state);
     return made;
   }
