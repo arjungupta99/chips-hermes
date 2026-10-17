@@ -97,7 +97,11 @@ export async function startFakeHermes(options: { askFirst?: boolean } = {}): Pro
         choices: ["once", "session", "always", "deny"],
       });
       const denied = choice === "deny";
-      emit(run, "tool.completed", { tool: "terminal", duration: 0.4, error: denied, preview: denied ? "denied" : "12 passed", tool_call_id: "call_1" });
+      // Its terminal's result is JSON in the preview, as Hermes 0.22.0 sends it.
+      const result = denied
+        ? { output: "", exit_code: -1, error: "denied", approval: "Denied." }
+        : { output: "12 passed\n", exit_code: 0, error: null, approval: "Approved once." };
+      emit(run, "tool.completed", { tool: "terminal", duration: 0.4, error: denied, preview: JSON.stringify(result), tool_call_id: "call_1" });
       if (run.status === "cancelled") return;
       return finish(run, "completed", { completed: true, output: `Given: ${choice}`, usage, runtime: { model: "heron-2" } });
     }

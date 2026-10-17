@@ -454,7 +454,7 @@ export class Bridge {
     if (approvalId !== undefined) {
       await turn.run.executed(approvalId, failed ? "failed" : "executed").catch(() => undefined);
     }
-    const summary = sub ? event["summary"] : event["preview"];
+    const summary = sub ? event["summary"] : resultWords(event["preview"]);
     const seconds = typeof event["duration"] === "number" ? event["duration"] : undefined;
     await turn.run
       .step({
@@ -619,6 +619,25 @@ export function goalOf(message: MessageNew, name: string): string {
   const named = first.toLowerCase().startsWith(`@${name.toLowerCase()}`);
   const goal = named ? first.slice(name.length + 1).trim() : first.replace(/^@\S+\s*/, "");
   return (goal === "" ? `Answer ${message.from.display_name}` : goal).slice(0, 300);
+}
+
+/**
+ * A tool's result as a person reads it. Hermes's terminal sends its whole result as JSON in the
+ * preview (0.22.0: `{"output": …, "exit_code": …, "approval": …}`): what it printed, else its
+ * error. Anything else is said as Hermes sent it.
+ */
+function resultWords(preview: unknown): unknown {
+  if (typeof preview !== "string" || !preview.trimStart().startsWith("{")) return preview;
+  let result: unknown;
+  try {
+    result = JSON.parse(preview);
+  } catch {
+    return preview;
+  }
+  if (typeof result !== "object" || result === null || !("output" in result)) return preview;
+  const { output, error } = result as { output?: unknown; error?: unknown };
+  const said = [output, error].find((each) => typeof each === "string" && each.trim() !== "");
+  return typeof said === "string" ? said.trim() : "";
 }
 
 function lastLine(text: string): string {

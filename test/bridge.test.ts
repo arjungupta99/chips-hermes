@@ -151,6 +151,9 @@ describe("what it asks", () => {
     const executed = await sent(chips, "approval.executed");
     assert.equal(executed.payload["outcome"], "executed", "the allowed call said how it went");
     assert.deepEqual(hermes.answers, [{ choice: "always", request_id: "req_1" }]);
+    // What the command printed, not the JSON Hermes's terminal wraps it in.
+    const ran = await sent(chips, "step.log", (event) => event.payload["status"] === "done");
+    assert.equal(ran.payload["summary"], "12 passed");
   });
 
   it("gives Hermes deny when a person says no", async () => {
@@ -160,6 +163,8 @@ describe("what it asks", () => {
     await chips.decide(String(asked.payload["approval_id"]), "denied");
     const words = await sent(chips, "message.post", (event) => event.run_id === asked.run_id);
     assert.equal(words.payload["text"], "Given: deny");
+    const stopped = await sent(chips, "step.log", (event) => event.payload["status"] === "failed");
+    assert.equal(stopped.payload["summary"], "denied");
   });
 
   it("settles a card answered in Hermes's own tools", async () => {

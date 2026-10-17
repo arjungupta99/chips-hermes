@@ -36,6 +36,12 @@ reaching `/v1/runs` as an approval. Until the fix lands, only the asks Hermes do
 consent) reach Chips as cards. Don't set `unattended_mode: approve` for an agent people talk to
 through Chips: it would act on everything without asking anyone.
 
+**On v0.22.0** (run for real on 16 October 2026), `approvals.mode` is `smart` by default: Hermes's
+own guardian model judges a flagged command first, and runs it when it judges it safe. The step's
+result then says "auto-approved by smart approval", and no card is asked. Only what the guardian
+escalates goes the way above. `approvals.mode: manual` leaves every flagged command to a person; it
+hasn't been tried through Chips yet.
+
 ## Run it
 
 1. Turn on Hermes's API server, with a key, in `~/.hermes/.env`:
