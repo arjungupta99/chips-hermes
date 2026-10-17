@@ -404,7 +404,9 @@ export class Bridge {
   private async sessionFor({ id, agent, spaceId }: Room): Promise<string> {
     const kept = this.options.state.sessions[id];
     if (kept !== undefined) return kept;
-    const made = await agent.client.newSession(`Chips room ${spaceId}`);
+    // Hermes keeps a title to one session, so each other agent's session in a room is named for it.
+    const who = id.slice(0, id.lastIndexOf("|"));
+    const made = await agent.client.newSession(`Chips room ${spaceId}${who === agent.key ? "" : ` · ${who}`}`);
     this.options.state.sessions[id] = made;
     this.options.saveState(this.options.state);
     return made;

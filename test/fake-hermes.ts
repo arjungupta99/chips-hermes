@@ -54,6 +54,8 @@ export async function startFakeHermes(options: { askFirst?: boolean } = {}): Pro
   const key = "hermes-test-key";
   const runs = new Map<string, FakeRun>();
   let count = 0;
+  /** Each session's title, as Hermes keeps it: no two sessions share one. */
+  const titles = new Map<string, string>();
   const fake: Omit<FakeHermes, "url" | "close"> = {
     key,
     started: [],
@@ -180,8 +182,15 @@ export async function startFakeHermes(options: { askFirst?: boolean } = {}): Pro
         return json(response, 200, { object: "list", data: [{ id: "hermes-agent", object: "model", owned_by: "hermes" }] });
       }
       if (method === "POST" && path === "/api/sessions") {
+        // Hermes keeps a session's title to that session, as its API server does.
+        const title = String((await bodyOf(request))["title"] ?? "");
+        const taken = titles.get(title);
+        if (taken !== undefined) {
+          return json(response, 400, { error: { message: `Title '${title}' is already in use by session ${taken}` } });
+        }
         const id = `sess_${fake.sessions.length + 1}`;
         fake.sessions.push(id);
+        if (title !== "") titles.set(title, id);
         return json(response, 200, { id });
       }
       if (method === "POST" && path === "/v1/runs") {
