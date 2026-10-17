@@ -78,3 +78,13 @@ They run the bridge against Chips's conformance fake and a scripted Hermes API s
 (`test/fake-hermes.ts`), on Hermes's own routes and event names. That includes Chips's golden
 scenario. The SDK and the kit are in `vendor/`, packed from a Chips checkout with
 `pnpm release:sdk <this repo>/vendor`.
+
+```
+npm run e2e
+```
+
+The gallery's card for this connector, run as a person runs it, against a scratch Chips from a
+Chips checkout (`CHIPS_REPO`, `~/Work/Chips` unless set; skipped without one) and the same scripted Hermes.
+Each thing not set up stops it with the link still good; then it joins with what the card grants,
+says hello once in its room, says nothing more started again, and takes up a new link in place of
+the key it kept. The scratch Chips, the link and the run come from Chips's `tools/connect-kit`.
