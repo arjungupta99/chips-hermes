@@ -18,6 +18,7 @@ Apache-2.0. Not published: a local repository until Chips's SDK is.
 | The thinking bubble's words | `reasoning.available`, `message.interim` |
 | Steps, drawn by kind | `tool.started` / `tool.completed` (by `tool_call_id`, else first in, first out per tool); a sub-agent's `subagent.start` / `subagent.complete` |
 | The reply | `run.completed`'s `output`, else the `message.delta`s |
+| Files in the reply | each `MEDIA:<path>` line of its own in the reply, taken out of the words and sent from `folder` (each turn is told how); a file outside it is refused, and the reply says so |
 | Cost | the run's tokens; a sub-agent's `cost_usd` as its step's share |
 | An approval card | `approval.request` → `POST …/approval`: once, session or always where Hermes offers it, else once; deny for a no. One answered in Hermes's own tools is settled in Chips (ADR 0079) |
 | Stop | `POST …/stop` |
@@ -61,7 +62,10 @@ hasn't been tried through Chips yet.
    - a profile under `/p/<profile>`, with `gateway.multiplex_profiles` on and that profile's own key;
    - a profile's own gateway at a `url` of its own.
 
-   Each key is read from the environment variable `keyEnv` names.
+   Each key is read from the environment variable `keyEnv` names. `folder` is where Hermes works
+   (the gateway's `MESSAGING_CWD`), for the config or one agent: the files an answer sends go to
+   the room from there and from nowhere else. Without it an agent isn't told how to send a file,
+   and answers with a path, which nobody in the room can open.
 
 3. Join Chips once, with a link from Chips's gallery (Add an agent → Hermes), whose card gives
    this line with the link in it:

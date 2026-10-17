@@ -4,6 +4,9 @@
  */
 
 import { strict as assert } from "node:assert";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, it } from "node:test";
 import { type FakeChips, type StoredEvent, startFakeChips } from "@chipschat/conformance";
 import { type Chips, connect, type Decision } from "@chipschat/harness";
@@ -27,7 +30,7 @@ afterEach(async () => {
 const AGENT = { name: "Hermes", profile: "default" } as const;
 
 async function rig(
-  options: { state?: BridgeState; chips?: FakeChips; hermes?: FakeHermes; profile?: string; model?: string } = {},
+  options: { state?: BridgeState; chips?: FakeChips; hermes?: FakeHermes; profile?: string; model?: string; folder?: string } = {},
 ): Promise<Rig> {
   const chips = options.chips ?? (await startFakeChips({ capabilities: ["agents"] }));
   if (options.chips === undefined) open.push(() => chips.close());
@@ -38,7 +41,14 @@ async function rig(
   const address = { url: hermes.url, key: hermes.key, profile: options.profile ?? AGENT.profile };
   const bridge = new Bridge({
     chips: client,
-    agents: [{ name: AGENT.name, address, ...(options.model === undefined ? {} : { model: options.model }) }],
+    agents: [
+      {
+        name: AGENT.name,
+        address,
+        ...(options.model === undefined ? {} : { model: options.model }),
+        ...(options.folder === undefined ? {} : { folder: options.folder }),
+      },
+    ],
     home: chips.address.spaceId,
     state,
     saveState: () => undefined,
@@ -135,6 +145,42 @@ describe("a new agent a person asks for (Chips ADR 0108)", () => {
     assert.deepEqual([...took].sort(), [...made].sort(), "each took its turn as itself");
     assert.equal(new Set(hermes.started.map((run) => run.sessionId)).size, 2, "two Hermes sessions");
     assert.deepEqual(Object.keys(state.sessions).sort(), made.map((id) => `${id}|${room}`).sort());
+  });
+});
+
+// Hermes's agents answered with a path or a 127.0.0.1 link, which no phone opens (Chips TT-7).
+describe("the files an answer names", () => {
+  /** A folder Hermes works in, with a page in it, and a file beside it that isn't Hermes's. */
+  function folders(): string {
+    const root = mkdtempSync(join(tmpdir(), "chips-hermes-files-"));
+    open.push(async () => rmSync(root, { recursive: true, force: true }));
+    mkdirSync(join(root, "work"));
+    writeFileSync(join(root, "work", "page.html"), "<p>play</p>");
+    writeFileSync(join(root, "secret.txt"), "not Hermes's");
+    return join(root, "work");
+  }
+
+  it("sends each file a MEDIA: line names from its folder, and says what it couldn't send", async () => {
+    const { chips, hermes } = await rig({ folder: folders() });
+    await chips.say("send the page");
+    const started = await sent(chips, "run.started");
+    const words = await sent(chips, "message.post", (event) => event.run_id === started.run_id);
+    assert.equal(words.payload["text"], "The page is ready.\n\n(secret.txt was not attached: it is outside the agent's folder.)");
+    const attachments = words.payload["attachments"] as { filename: string }[];
+    assert.deepEqual(
+      attachments.map((each) => each.filename),
+      ["page.html"],
+    );
+    assert.match(hermes.started[0]?.input ?? "", /MEDIA:<path> on a line of its own/, "it was told how");
+  });
+
+  it("is told nothing of files, and its words go as they are, with no folder set", async () => {
+    const { chips, hermes } = await rig();
+    await chips.say("send the page");
+    const started = await sent(chips, "run.started");
+    const words = await sent(chips, "message.post", (event) => event.run_id === started.run_id);
+    assert.equal(words.payload["text"], "The page is ready.\n\nMEDIA:page.html\nMEDIA:../secret.txt");
+    assert.doesNotMatch(hermes.started[0]?.input ?? "", /MEDIA:<path>/);
   });
 });
 

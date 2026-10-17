@@ -115,6 +115,11 @@ export async function startFakeHermes(options: { askFirst?: boolean } = {}): Pro
       return finish(run, "completed", { completed: true, output: "Cleaned.", usage, runtime: { model: "heron-2" } });
     }
     if (/\bfail\b/.test(words)) return finish(run, "failed", { completed: false, error: "The model refused." });
+    if (/\bsend\b/.test(words)) {
+      // Files named as the Chips SDK tells an agent: one from its folder, one from outside it.
+      const output = "The page is ready.\n\nMEDIA:page.html\nMEDIA:../secret.txt";
+      return finish(run, "completed", { completed: true, output, usage, runtime: { model: "heron-2" } });
+    }
     if (/\bslow\b/.test(words)) {
       for (let i = 0; i < 200 && run.status === "running"; i += 1) {
         emit(run, "message.delta", { delta: "." });

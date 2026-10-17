@@ -6,6 +6,8 @@
  */
 
 import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { resolve } from "node:path";
 import { filledIn } from "@chipschat/harness";
 import type { AgentConfig } from "./bridge.js";
 import { HermesClient } from "./hermes.js";
@@ -24,19 +26,27 @@ export const STILL_GOOD = "The link is still good: run the same command again on
 
 const EXAMPLE = '{ "agents": [{ "name": "Hermes", "profile": "default", "keyEnv": "API_SERVER_KEY" }] }';
 
+/** A folder the config names, `~` at the home of the user the bridge runs as. */
+function folderOf(said: unknown): string | undefined {
+  if (typeof said !== "string" || said === "") return undefined;
+  return resolve(said === "~" || said.startsWith("~/") ? homedir() + said.slice(1) : said);
+}
+
 /** The config at `path`, each agent with its key from the environment. */
 export function readConfig(path: string, env: NodeJS.ProcessEnv = process.env): Config {
   if (!existsSync(path)) {
     throw new SetupError(`There is no config at ${path}. Write ${EXAMPLE} there. ${STILL_GOOD}`);
   }
-  const raw = JSON.parse(readFileSync(path, "utf8")) as { name?: unknown; url?: unknown; agents?: unknown };
+  const raw = JSON.parse(readFileSync(path, "utf8")) as { name?: unknown; url?: unknown; folder?: unknown; agents?: unknown };
   const url = typeof raw.url === "string" ? raw.url : "http://127.0.0.1:8642";
+  const folder = folderOf(raw.folder);
   if (!Array.isArray(raw.agents) || raw.agents.length === 0) {
     throw new SetupError(`${path} names no agents: ${EXAMPLE}. ${STILL_GOOD}`);
   }
   const agents = (raw.agents as Record<string, unknown>[]).map((agent) => {
     const keyEnv = typeof agent["keyEnv"] === "string" ? agent["keyEnv"] : "API_SERVER_KEY";
     const key = env[keyEnv];
+    const own = folderOf(agent["folder"]) ?? folder;
     if (typeof agent["name"] !== "string") throw new SetupError(`Each agent in ${path} has a name. ${STILL_GOOD}`);
     if (!filledIn(key)) {
       throw new SetupError(
@@ -52,6 +62,7 @@ export function readConfig(path: string, env: NodeJS.ProcessEnv = process.env): 
         ...(typeof agent["profile"] === "string" ? { profile: agent["profile"] } : {}),
       },
       ...(typeof agent["model"] === "string" ? { model: agent["model"] } : {}),
+      ...(own === undefined ? {} : { folder: own }),
     };
   });
   return { ...(typeof raw.name === "string" ? { name: raw.name } : {}), agents };

@@ -20,7 +20,7 @@
  */
 
 import type { Agent, Chips, Decision, Run, Speaker } from "@chipschat/harness";
-import { promptFor } from "@chipschat/harness";
+import { promptFor, sendAnswer } from "@chipschat/harness";
 import { type AgentAsked, createIdGenerator, type MessageNew, type StepKind } from "@chipschat/protocol";
 import { HermesClient, HermesError, type ProfileAddress, type RunEvent, TERMINAL } from "./hermes.js";
 
@@ -33,6 +33,11 @@ export interface AgentConfig {
   readonly keyEnv?: string | undefined;
   /** The model each of its runs asks for, when not the profile's own. */
   readonly model?: string | undefined;
+  /**
+   * Where its profile works (the gateway's `MESSAGING_CWD`): a file an answer names with a
+   * `MEDIA:` line is sent to the room from here, and from nowhere else. None, and nothing is sent.
+   */
+  readonly folder?: string | undefined;
 }
 
 /** What the bridge keeps across restarts beside the SDK's own store. */
@@ -348,7 +353,8 @@ export class Bridge {
       await this.failed(turn, `${agent.config.name} couldn't open a session in Hermes: ${messageOf(error)}`, true);
       return;
     }
-    let text: string | undefined = promptFor(message, speakerId === undefined ? {} : { taker: speakerId });
+    const sendsFiles = agent.config.folder !== undefined;
+    let text: string | undefined = promptFor(message, { ...(speakerId === undefined ? {} : { taker: speakerId }), sendsFiles });
     for (let round = 0; text !== undefined && !turn.cancelled && !run.over; round += 1) {
       const last = await this.once(turn, session, text, `${run.id}:${round}`);
       if (last === undefined) return;
@@ -600,9 +606,20 @@ export class Bridge {
     }
     await this.counted(turn, last);
     const output = typeof last["output"] === "string" ? last["output"].trim() : "";
-    const reply = output !== "" ? output : turn.reply.trim();
-    if (reply !== "") await turn.speaker.post({ spaceId: run.spaceId, runId: run.id, text: reply });
-    const summary = reply === "" ? "Done." : reply.length <= 2000 ? reply : `${reply.slice(0, 1990)}…`;
+    const answer = output !== "" ? output : turn.reply.trim();
+    // The files its `MEDIA:` lines name go with its words, from its folder (Chips TT-7).
+    const folder = agent.config.folder;
+    const { chips } = this.options;
+    const post =
+      folder === undefined
+        ? { text: answer, uploadIds: [], summary: answer }
+        : await sendAnswer(answer, { folders: [folder], upload: (input) => chips.upload(input) });
+    const reply = post.text;
+    if (reply !== "" || post.uploadIds.length > 0) {
+      await turn.speaker.post({ spaceId: run.spaceId, runId: run.id, text: reply, uploadIds: post.uploadIds });
+    }
+    const said = post.summary;
+    const summary = said === "" ? "Done." : said.length <= 2000 ? said : `${said.slice(0, 1990)}…`;
     await run.complete({ summary });
     this.log(`${agent.config.name} answered in ${run.spaceId}`);
   }
