@@ -1,8 +1,8 @@
 /**
  * What the bridge checks before it takes up a link, which works once (Chips ADR 0122): the config
  * it reads, each agent's key filled in rather than the `…` the gallery's command was copied with,
- * and Hermes answering at each agent's address. Anything missing stops it with what to do, and the
- * link is still good for the same command run again.
+ * and Hermes answering at each agent's address and taking its key. Anything missing stops it with
+ * what to do, and the link is still good for the same command run again.
  */
 
 import { existsSync, readFileSync } from "node:fs";
@@ -45,6 +45,7 @@ export function readConfig(path: string, env: NodeJS.ProcessEnv = process.env): 
     }
     return {
       name: agent["name"],
+      keyEnv,
       address: {
         url: typeof agent["url"] === "string" ? agent["url"] : url,
         key,
@@ -56,15 +57,23 @@ export function readConfig(path: string, env: NodeJS.ProcessEnv = process.env): 
   return { ...(typeof raw.name === "string" ? { name: raw.name } : {}), agents };
 }
 
-/** Hermes answering for each agent, before the link is spent. */
+/** Hermes answering for each agent, and taking its key, before the link is spent. */
 export async function checkHermes(
   config: Config,
-  clientFor: (agent: AgentConfig) => { healthy(): Promise<boolean> } = (agent) => new HermesClient(agent.address),
+  clientFor: (agent: AgentConfig) => { healthy(): Promise<boolean>; takesKey(): Promise<boolean> } = (agent) =>
+    new HermesClient(agent.address),
 ): Promise<void> {
   for (const agent of config.agents) {
-    if (await clientFor(agent).healthy()) continue;
-    throw new SetupError(
-      `Hermes isn't answering for ${agent.name} at ${agent.address.url}: start its API server (API_SERVER_ENABLED=true, then hermes gateway). ${STILL_GOOD}`,
-    );
+    const client = clientFor(agent);
+    if (!(await client.healthy())) {
+      throw new SetupError(
+        `Hermes isn't answering for ${agent.name} at ${agent.address.url}: start its API server (API_SERVER_ENABLED=true, then hermes gateway). ${STILL_GOOD}`,
+      );
+    }
+    if (!(await client.takesKey())) {
+      throw new SetupError(
+        `Hermes at ${agent.address.url} refused ${agent.name}'s key in $${agent.keyEnv ?? "API_SERVER_KEY"}: give it the API_SERVER_KEY its API server was started with. ${STILL_GOOD}`,
+      );
+    }
   }
 }

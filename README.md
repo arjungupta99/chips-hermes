@@ -63,8 +63,8 @@ through Chips: it would act on everything without asking anyone.
    ```
 
    Or with `CHIPS_URL` and a code a person allows. Before it takes the link up, which works once,
-   it checks the config is there, each key is filled in (not the card's `…`), and Hermes answers;
-   anything missing stops it with what to do, and the link is still good. Joined, its Main agent
+   it checks the config is there, each key is filled in (not the card's `…`), and Hermes answers
+   and takes the key (`/v1/models`, since `/health` needs none); anything missing stops it with what to do, and the link is still good. Joined, its Main agent
    says hello in its room once, which the card waits for. The key Chips gives it is kept, so later
    starts need only the Hermes keys; a new link from Chips replaces it.
 

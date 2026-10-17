@@ -29,6 +29,8 @@ export interface AgentConfig {
   readonly name: string;
   /** Its profile's gateway and key. */
   readonly address: ProfileAddress;
+  /** The environment variable its key was read from, to name when Hermes refuses it. */
+  readonly keyEnv?: string | undefined;
   /** The model each of its runs asks for, when not the profile's own. */
   readonly model?: string | undefined;
 }

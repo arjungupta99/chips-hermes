@@ -1,6 +1,7 @@
 /**
  * What the bridge checks before it takes up a link (Chips ADR 0122): a link works once, so a
- * config missing, a key left as the command's `…`, or Hermes not answering stops it first.
+ * config missing, a key left as the command's `…`, Hermes not answering, or Hermes refusing the
+ * key stops it first.
  */
 
 import { strict as assert } from "node:assert";
@@ -35,9 +36,18 @@ describe("before the link is taken up", () => {
   it("stops while Hermes isn't answering, and goes on once it is", async () => {
     const read = readConfig(config, { API_SERVER_KEY: "hk-live" });
     await assert.rejects(
-      checkHermes(read, () => ({ healthy: async () => false })),
+      checkHermes(read, () => ({ healthy: async () => false, takesKey: async () => true })),
       stopsWith(/Hermes isn't answering for Hermes at http:\/\/127\.0\.0\.1:8642/),
     );
-    await checkHermes(read, () => ({ healthy: async () => true }));
+    await checkHermes(read, () => ({ healthy: async () => true, takesKey: async () => true }));
+  });
+
+  // Its `/health` needs no key, so a key mistyped answers there (C2, 16 October 2026).
+  it("stops when Hermes answers but refuses the key", async () => {
+    const read = readConfig(config, { API_SERVER_KEY: "hk-mistyped" });
+    await assert.rejects(
+      checkHermes(read, () => ({ healthy: async () => true, takesKey: async () => false })),
+      stopsWith(/Hermes at http:\/\/127\.0\.0\.1:8642 refused Hermes's key in \$API_SERVER_KEY/),
+    );
   });
 });

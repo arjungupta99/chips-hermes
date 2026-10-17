@@ -65,6 +65,21 @@ export class HermesClient {
     }
   }
 
+  /**
+   * Whether it takes this profile's key: `GET /v1/models`, which needs it, as `/health` doesn't.
+   * Only a 401 or 403 is the key's fault; any other answer isn't.
+   */
+  async takesKey(): Promise<boolean> {
+    try {
+      const answer = await this.fetcher(`${this.base}/v1/models`, {
+        headers: { authorization: `Bearer ${this.address.key}` },
+      });
+      return answer.status !== 401 && answer.status !== 403;
+    } catch {
+      return true;
+    }
+  }
+
   /** A session of its own for a room: `POST /api/sessions`, so no other surface owns it. */
   async newSession(title: string): Promise<string> {
     const made = await this.call("POST", "/api/sessions", { title });

@@ -171,6 +171,9 @@ export async function startFakeHermes(options: { askFirst?: boolean } = {}): Pro
       const profile = profiled?.[1] ?? "default";
       const path = profiled?.[2] ?? url.pathname;
       const method = request.method ?? "GET";
+      if (method === "GET" && path === "/v1/models") {
+        return json(response, 200, { object: "list", data: [{ id: "hermes-agent", object: "model", owned_by: "hermes" }] });
+      }
       if (method === "POST" && path === "/api/sessions") {
         const id = `sess_${fake.sessions.length + 1}`;
         fake.sessions.push(id);

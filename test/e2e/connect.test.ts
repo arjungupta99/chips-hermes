@@ -59,6 +59,10 @@ describe("Hermes's card, from a link to its hello", { skip, timeout: 180_000 }, 
     hermes.up = false;
     await stopped(filled(card.command), /Hermes isn't answering for Hermes at http:\/\/127\.0\.0\.1:\d+/);
     hermes.up = true;
+    await stopped(
+      card.command.replace("API_SERVER_KEY=…", "API_SERVER_KEY=not-the-servers-key"),
+      /Hermes at http:\/\/127\.0\.0\.1:\d+ refused Hermes's key in \$API_SERVER_KEY/,
+    );
   });
 
   it("joins with what the card grants, and says hello once in its room", async () => {
