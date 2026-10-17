@@ -1,0 +1,65 @@
+/**
+ * `npm run keep`: the bridge kept running (Chips's setup audit HS-15). Run as `npm start` is, with
+ * a link or without, it joins, then writes a launch agent (a Mac) or a systemd user unit (Linux)
+ * that runs `npm start`'s bridge from login and again whenever it stops, and this copy ends:
+ * closing the terminal, or restarting the machine, no longer takes the harness offline in Chips.
+ * `npm run keep -- --stop` stops it and removes the file.
+ */
+
+import { homedir } from "node:os";
+import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { keepEnvironment, keepRunning, stopKeeping } from "@chipschat/harness";
+
+const flags = process.argv.slice(2);
+
+/** The words that aren't flags: the config's path, where one is given. */
+export const words = flags.filter((word) => !word.startsWith("--"));
+
+/** A word as a whole path, for the kept copy, which runs from elsewhere. */
+const whole = (word: string) => resolve(word.startsWith("~/") ? join(homedir(), word.slice(2)) : word);
+
+/** This repository, where the kept bridge runs from. */
+const here = fileURLToPath(new URL("..", import.meta.url)).replace(/\/$/, "");
+
+const end = (line: string, code: number): never => {
+  (code === 0 ? process.stdout : process.stderr).write(`${line}\n`);
+  process.exit(code);
+};
+
+/** `npm run keep -- --stop`: the kept bridge stopped and its file removed, and nothing more. */
+export function stopIfAsked(label: string): void {
+  if (!flags.includes("--stop")) return;
+  const stopped = stopKeeping(label);
+  if (stopped.state === "stopped") end(`Stopped ${label}, and removed ${stopped.path}.`, 0);
+  if (stopped.state === "theirs") end(`${stopped.path} wasn't written by this bridge: it was left as it is.`, 1);
+  end(`Nothing called ${label} was kept running here.`, 0);
+}
+
+/**
+ * Once joined, with `--keep`: the bridge kept running from `url`, carrying the environment
+ * variables `names` where they are set, and this copy ends. Where nothing can keep it, it goes on
+ * here.
+ */
+export function keepIfAsked(label: string, url: string, names: readonly string[], log: (line: string) => void): void {
+  if (!flags.includes("--keep")) return;
+  const kept = keepRunning({
+    label,
+    command: [process.execPath, "--import", "tsx", "src/main.ts", ...words.map(whole)],
+    folder: here,
+    environment: keepEnvironment(url, process.env, names),
+  });
+  if (kept.state === "kept") {
+    end(
+      `Kept running as ${label}: it starts at login, and again whenever it stops. What it says goes to ${kept.logFile}. \`npm run keep -- --stop\` stops it.`,
+      0,
+    );
+  }
+  if (kept.state === "theirs") {
+    end(
+      `${kept.path} is there already and wasn't written by this bridge: it was left as it is, and nothing more was started, so the harness doesn't answer twice.`,
+      1,
+    );
+  }
+  log("Nothing on this machine can keep it running (launchd, systemd): it runs here, while this terminal is open.");
+}

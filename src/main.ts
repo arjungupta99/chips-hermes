@@ -13,6 +13,8 @@
  * from the environment variable `keyEnv` names, never written in the file. What it keeps is beside
  * the config: the SDK's state (cursor, unanswered events, runs not ended) and which session each
  * room is.
+ *
+ * `npm run keep` is the same, then keeps the bridge running from login (`keep.ts`).
  */
 
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
@@ -20,12 +22,15 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { connect, fileStore, helloOnce, join as joinChips } from "@chipschat/harness";
 import { Bridge, type BridgeState } from "./bridge.js";
+import { keepIfAsked, stopIfAsked, words } from "./keep.js";
 import { type Config, checkHermes, readConfig, SetupError } from "./setup.js";
 
 const home = (path: string) => (path.startsWith("~/") ? join(homedir(), path.slice(2)) : path);
 const link = process.env["CHIPS_JOIN_LINK"] || undefined;
 
-const configPath = resolve(home(process.argv[2] ?? "~/.chips-hermes/config.json"));
+const LABEL = "chat.chips.hermes";
+stopIfAsked(LABEL);
+const configPath = resolve(home(words[0] ?? "~/.chips-hermes/config.json"));
 // What it needs, checked before a link is taken up, which works once. Started without a link, a
 // bridge up before Hermes waits for it, and says so in Chips meanwhile.
 let config: Config;
@@ -50,6 +55,8 @@ const joined = await joinChips({
   wants: ["agents", "new_agents"],
   onCode: (code) => log(`Allow this harness in Chips: ${code}`),
 });
+// Joined, `npm run keep` hands over to a copy kept running, which says the hello.
+keepIfAsked(LABEL, joined.url, ["HERMES_HOME", ...config.agents.map((agent) => agent.keyEnv ?? "API_SERVER_KEY")], log);
 
 const state: BridgeState = existsSync(statePath)
   ? (JSON.parse(readFileSync(statePath, "utf8")) as BridgeState)

@@ -75,6 +75,14 @@ That is all most people need: with no config the bridge is Hermes's default prof
 the `API_SERVER_KEY` in `$API_SERVER_KEY` if set, else in Hermes's own `.env` (`$HERMES_HOME/.env`
 when `HERMES_HOME` is set).
 
+**Keep it running.** `npm run keep` does what `npm start` does, with the link or without, then
+writes a launch agent (`~/Library/LaunchAgents/chat.chips.hermes.plist`; a systemd user unit on
+Linux) that runs the bridge from login and again whenever it stops, and ends: closing the terminal
+or restarting the machine no longer takes it offline in Chips. Its log is
+`~/Library/Logs/chips-hermes.log`. `npm run keep -- --stop` stops it and removes the file. Stop a
+copy started by hand first: two answer twice. Hermes's own `hermes gateway` is kept running its own
+way.
+
 **Folders.** Each agent gets a folder of its own, `~/chips-hermes/agents/<its name>`, made the
 first time it is spoken to and kept by its Chips agent after a rename. Each run tells the agent it
 is its folder, in the run's `instructions`. The files an answer sends go to the room from there and
