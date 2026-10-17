@@ -67,6 +67,26 @@ hasn't been tried through Chips yet.
    the room from there and from nowhere else. Without it an agent isn't told how to send a file,
    and answers with a path, which nobody in the room can open.
 
+   Hermes's own hint for its API server tells the agent the opposite: that a `MEDIA:` tag for
+   anything but a picture reaches nobody, and to give the path instead. An agent believes its
+   system prompt over a turn's note (the Chips runs of 17 October 2026: "this interface doesn't let
+   me attach HTML files"), so replace that hint in `~/.hermes/config.yaml`, keeping the rest of it:
+
+   ```yaml
+   platform_hints:
+     api_server:
+       replace: >-
+         You're responding through an API server. The rendering layer is unknown — assume plain
+         text. No markdown formatting (no asterisks, bullets, headers, code fences). Treat this
+         like a conversation, not a document. Keep responses brief and natural. File delivery:
+         these runs come from Chips, whose bridge takes each MEDIA:/absolute/path line of its own
+         out of your answer and attaches that file to your message, whatever its type, up to
+         100 MB. Send a file that way; a plain path reaches nobody.
+   ```
+
+   Hermes keeps a session's system prompt from its first turn, so a room whose session began
+   before the change keeps the old hint; a new room has the new one.
+
 3. Join Chips once, with a link from Chips's gallery (Add an agent → Hermes), whose card gives
    this line with the link in it:
 
