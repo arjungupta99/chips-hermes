@@ -34,6 +34,8 @@ export interface ScratchChips {
   card(id: string): Promise<CardLink>;
   request(requestId: string): Promise<{ state: string; harness_id?: string; space_id?: string }>;
   capabilities(harnessId: string): Promise<readonly string[]>;
+  /** A harness's agents in use, and which is its Main (Chips ADR 0183). */
+  agents(harnessId: string): Promise<readonly { readonly name: string; readonly lead: boolean }[]>;
   said(spaceId: string): Promise<readonly Said[]>;
   until<T>(what: string, check: () => Promise<T | undefined | false>, ms?: number): Promise<T>;
   run(command: string, options: { folder: string; home: string; path?: string }): Run;

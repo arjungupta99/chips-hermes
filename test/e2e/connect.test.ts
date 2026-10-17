@@ -83,6 +83,8 @@ describe("Hermes's card, from a link to its hello", { skip, timeout: 180_000 }, 
         kept().map((each) => each.harnessId),
         [request.harness_id],
       );
+      // One agent, called what its config says, as its Main: no "Hermes 2" beside it (Chips ON-10).
+      assert.deepEqual(await chips.agents(request.harness_id), [{ name: "Hermes", lead: true }]);
     } finally {
       await run.stop();
     }
@@ -116,6 +118,8 @@ describe("Hermes's card, from a link to its hello", { skip, timeout: 180_000 }, 
         kept().map((each) => each.harnessId),
         [request.harness_id],
       );
+      // One agent, as its Main. The first harness's agent still holds "Hermes" (ADR 0091).
+      assert.deepEqual(await chips.agents(String(request.harness_id)), [{ name: "Hermes 2", lead: true }]);
     } finally {
       await run.stop();
     }

@@ -156,15 +156,12 @@ export class Bridge {
   async start(): Promise<void> {
     const { chips } = this.options;
     const known = await chips.agents.list();
-    // A Main agent Chips has already is kept, under whatever key: a harness has one at most.
-    const main = known.find((agent) => agent.lead);
     for (const [index, config] of this.options.agents.entries()) {
       const key = keyOf(config);
-      const kept = index === 0 && main !== undefined && main.key !== key ? main : undefined;
-      const registered = kept ?? (await chips.agents.register({ key, name: config.name, lead: index === 0 }));
+      const registered =
+        index === 0 ? await this.seatMain(config, known) : await chips.agents.register({ key, name: config.name });
       const client = this.options.clientFor?.(config) ?? new HermesClient(config.address);
       this.agents.push({ config, key, client, agentId: registered.agentId, up: true });
-      if (index === 0) await this.goHome(registered, known);
     }
     this.ours = new Set([...known.map((agent) => agent.agentId), ...this.agents.map((agent) => agent.agentId)]);
     chips.on("message.new", (message) => void this.hear(message));
@@ -180,6 +177,31 @@ export class Bridge {
   /** The Main agent, the first registered, once started: who says the harness's first words. */
   get mainAgentId(): string | undefined {
     return this.agents[0]?.agentId;
+  }
+
+  /**
+   * The Main agent: the one Chips made for the harness when it joined, keyed by the harness's own
+   * id, registered as Main (Chips ADR 0183), so it is called what the config says and has no
+   * second beside it. It goes home, and a Main of ours from before that, out of its room now, is
+   * archived, which gives its name up. With no such agent (a harness from before them), the Main
+   * Chips has is kept: a harness has one at most.
+   */
+  private async seatMain(config: AgentConfig, known: readonly Agent[]): Promise<Agent> {
+    const { chips } = this.options;
+    const before = known.find((agent) => agent.lead);
+    const made = known.some((agent) => agent.key === chips.harnessId);
+    if (!made && before !== undefined) {
+      await this.goHome(before, known);
+      return before;
+    }
+    const main = await chips.agents.register({ key: chips.harnessId, name: config.name, lead: true });
+    await this.goHome(main, known);
+    if (before !== undefined && before.agentId !== main.agentId) {
+      await chips.agents
+        .register({ key: before.key, name: before.name, state: "archived" })
+        .catch((error: unknown) => this.log(`${before.name} stays: ${String(error)}`));
+    }
+    return main;
   }
 
   /** The Main agent into the harness's own room, in the place of whichever of ours is there. */

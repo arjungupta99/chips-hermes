@@ -49,9 +49,7 @@ async function rig(
     client.close();
   });
   await bridge.start();
-  const agents = await client.agents.list();
-  const agentId = agents.find((each) => each.key === keyOf({ name: AGENT.name, address }))?.agentId ?? "";
-  return { chips, client, bridge, hermes, state, agentId };
+  return { chips, client, bridge, hermes, state, agentId: bridge.mainAgentId ?? "" };
 }
 
 async function until(done: () => boolean, timeoutMs = 3000): Promise<void> {
@@ -65,6 +63,45 @@ async function until(done: () => boolean, timeoutMs = 3000): Promise<void> {
 function sent(chips: FakeChips, type: string, more: (event: StoredEvent) => boolean = () => true): Promise<StoredEvent> {
   return chips.waitFor((event) => (event.type === type && more(event) ? event : undefined), 3000);
 }
+
+// Its Main agent was "Hermes 2" beside the "Hermes" Chips made at the join (Chips ON-10).
+describe("its Main agent (Chips ADR 0183)", () => {
+  it("is the agent Chips made at the join, called what its config says, with no second", async () => {
+    const chips = await startFakeChips({ capabilities: ["agents"], harnessName: AGENT.name });
+    open.push(() => chips.close());
+    const { client, agentId } = await rig({ chips });
+    const agents = await client.agents.list();
+    assert.deepEqual(
+      agents.map((agent) => [agent.key, agent.name, agent.lead]),
+      [[client.harnessId, AGENT.name, true]],
+    );
+    assert.equal(agentId, agents[0]?.agentId);
+    assert.ok(agents[0]?.spaces.includes(chips.address.spaceId), "in its own room");
+  });
+
+  it("moves Main from one it made before, which it archives, and takes its room", async () => {
+    const chips = await startFakeChips({ capabilities: ["agents"], harnessName: AGENT.name });
+    open.push(() => chips.close());
+    // As a bridge did before: its own Main, numbered beside the default, in the default's place.
+    const before = await connect({ url: chips.address.url, token: chips.address.token });
+    const known = await before.agents.list();
+    const old = await before.agents.register({
+      key: keyOf({ name: AGENT.name, address: { url: "http://hermes", key: "k" } }),
+      name: AGENT.name,
+      lead: true,
+    });
+    await before.agents.attach(old.agentId, { spaceId: chips.address.spaceId, replacing: known[0]?.agentId ?? "" });
+    before.close();
+    assert.equal(old.name, `${AGENT.name} 2`);
+    const { client, agentId } = await rig({ chips });
+    const agents = await client.agents.list();
+    const main = agents.find((agent) => agent.agentId === agentId);
+    assert.deepEqual([main?.key, main?.name, main?.lead], [client.harnessId, AGENT.name, true]);
+    assert.ok(main?.spaces.includes(chips.address.spaceId), "back in its own room");
+    const gone = agents.find((agent) => agent.agentId === old.agentId);
+    assert.deepEqual([gone?.lead, gone?.state], [false, "archived"]);
+  });
+});
 
 describe("a turn", () => {
   it("is a run: a status, a step drawn by its kind, the words in the room, its tokens, and the end", async () => {
