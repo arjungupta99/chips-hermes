@@ -20,7 +20,7 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { connect, fileStore, helloOnce, join as joinChips } from "@chipschat/harness";
+import { connect, fileStore, helloOnce, JoinError, join as joinChips } from "@chipschat/harness";
 import { Bridge, type BridgeState } from "./bridge.js";
 import { keepIfAsked, stopIfAsked, words } from "./keep.js";
 import { type Config, checkHermes, readConfig, SetupError } from "./setup.js";
@@ -47,6 +47,12 @@ const folder = dirname(configPath);
 const statePath = join(folder, "sessions.json");
 const log = (line: string) => process.stdout.write(`${new Date().toISOString()} ${line}\n`);
 
+/** A link Chips refuses (spent, expired, not a link), said plainly: its words, no stack. */
+const refused = (error: unknown): never => {
+  if (!(error instanceof JoinError)) throw error;
+  process.stderr.write(`${error.message}\n`);
+  process.exit(1);
+};
 const joined = await joinChips({
   link,
   url: process.env["CHIPS_URL"],
@@ -54,7 +60,7 @@ const joined = await joinChips({
   software: "chips-hermes 0.1.0",
   wants: ["agents", "new_agents"],
   onCode: (code) => log(`Allow this harness in Chips: ${code}`),
-});
+}).catch(refused);
 // Joined, `npm run keep` hands over to a copy kept running, which says the hello.
 keepIfAsked(LABEL, joined.url, ["HERMES_HOME", ...config.agents.map((agent) => agent.keyEnv ?? "API_SERVER_KEY")], log);
 

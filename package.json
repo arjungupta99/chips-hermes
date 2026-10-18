@@ -1,28 +1,39 @@
 {
-  "name": "chips-hermes",
+  "name": "@chipschat/hermes",
   "version": "0.1.0",
-  "private": true,
   "description": "Hermes Agent as a Chips harness, on its Runs API: each profile a Chips agent, each room a Hermes session.",
   "license": "Apache-2.0",
   "type": "module",
   "engines": {
     "node": ">=22.19.0"
   },
+  "bin": {
+    "chips-hermes": "dist/main.js"
+  },
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "start": "tsx src/main.ts",
     "keep": "tsx src/main.ts --keep",
     "test": "node --import tsx --test test/*.test.ts",
     "e2e": "node --import tsx --test test/e2e/*.test.ts",
-    "typecheck": "tsc --noEmit"
-  },
-  "dependencies": {
-    "@chipschat/harness": "file:vendor/chipschat-harness-0.0.0.tgz",
-    "@chipschat/protocol": "file:vendor/chipschat-protocol-0.0.0.tgz",
-    "tsx": "4.21.0"
+    "typecheck": "tsc --noEmit",
+    "build": "esbuild src/main.ts --bundle --platform=node --target=node22 --format=esm --outfile=dist/main.js --log-level=warning --banner:js='#!/usr/bin/env node'",
+    "prepack": "npm run build"
   },
   "devDependencies": {
     "@chipschat/conformance": "file:vendor/chipschat-conformance-0.0.0.tgz",
+    "@chipschat/harness": "file:vendor/chipschat-harness-0.0.0.tgz",
+    "@chipschat/protocol": "file:vendor/chipschat-protocol-0.0.0.tgz",
     "@types/node": "22.19.0",
+    "esbuild": "0.27.7",
+    "tsx": "4.21.0",
     "typescript": "5.9.3"
   }
 }

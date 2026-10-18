@@ -7,7 +7,7 @@
  */
 
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { keepEnvironment, keepRunning, nodeOnPath, stopKeeping } from "@chipschat/harness";
 
@@ -19,8 +19,15 @@ export const words = flags.filter((word) => !word.startsWith("--"));
 /** A word as a whole path, for the kept copy, which runs from elsewhere. */
 const whole = (word: string) => resolve(word.startsWith("~/") ? join(homedir(), word.slice(2)) : word);
 
-/** This repository, where the kept bridge runs from. */
+/** This repository, or the installed package, where the kept bridge runs from. */
 const here = fileURLToPath(new URL("..", import.meta.url)).replace(/\/$/, "");
+
+/** Its bundle, as the published package runs (`dist/main.js`); else its source, run by tsx. */
+const self = fileURLToPath(import.meta.url);
+const run = self.endsWith(".js") ? [self] : ["--import", "tsx", "src/main.ts"];
+
+/** What a person types to run it again: `npm run keep --` in a checkout, else the command itself. */
+const again = process.env["npm_lifecycle_event"] === "keep" ? "npm run keep --" : basename(process.argv[1] ?? "chips");
 
 const end = (line: string, code: number): never => {
   (code === 0 ? process.stdout : process.stderr).write(`${line}\n`);
@@ -51,14 +58,14 @@ export function keepIfAsked(
   if (!flags.includes("--keep")) return;
   const kept = keepRunning({
     label,
-    command: [nodeOnPath(), "--import", "tsx", "src/main.ts", ...words.map(whole)],
+    command: [nodeOnPath(), ...run, ...words.map(whole)],
     folder: here,
     environment: keepEnvironment(url, process.env, names),
   });
   if (kept.state === "kept") {
     before();
     end(
-      `Kept running as ${label}: it starts at login, and again whenever it stops. What it says goes to ${kept.logFile}. \`npm run keep -- --stop\` stops it.`,
+      `Kept running as ${label}: it starts at login, and again whenever it stops. What it says goes to ${kept.logFile}. \`${[again, ...words, "--stop"].join(" ")}\` stops it.`,
       0,
     );
   }
