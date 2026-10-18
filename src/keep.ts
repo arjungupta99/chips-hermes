@@ -38,10 +38,16 @@ export function stopIfAsked(label: string): void {
 
 /**
  * Once joined, with `--keep`: the bridge kept running from `url`, carrying the environment
- * variables `names` where they are set, and this copy ends. Where nothing can keep it, it goes on
- * here.
+ * variables `names` where they are set, and this copy ends, `before` it does what it must hand
+ * over. Where nothing can keep it, or `CHIPS_KEEP=off` (a test of a card's line), it goes on here.
  */
-export function keepIfAsked(label: string, url: string, names: readonly string[], log: (line: string) => void): void {
+export function keepIfAsked(
+  label: string,
+  url: string,
+  names: readonly string[],
+  log: (line: string) => void,
+  before: () => void = () => undefined,
+): void {
   if (!flags.includes("--keep")) return;
   const kept = keepRunning({
     label,
@@ -50,6 +56,7 @@ export function keepIfAsked(label: string, url: string, names: readonly string[]
     environment: keepEnvironment(url, process.env, names),
   });
   if (kept.state === "kept") {
+    before();
     end(
       `Kept running as ${label}: it starts at login, and again whenever it stops. What it says goes to ${kept.logFile}. \`npm run keep -- --stop\` stops it.`,
       0,
@@ -61,5 +68,9 @@ export function keepIfAsked(label: string, url: string, names: readonly string[]
       1,
     );
   }
-  log("Nothing on this machine can keep it running (launchd, systemd): it runs here, while this terminal is open.");
+  log(
+    kept.state === "off"
+      ? "Keeping it running is off here (CHIPS_KEEP=off): it runs here, while this terminal is open."
+      : "Nothing on this machine can keep it running (launchd, systemd): it runs here, while this terminal is open.",
+  );
 }

@@ -62,8 +62,11 @@ hasn't been tried through Chips yet.
    this line with the link in it:
 
    ```
-   cd ~/Work/chips-hermes && CHIPS_JOIN_LINK='<link>' npm start
+   cd ~/Work/chips-hermes && CHIPS_JOIN_LINK='<link>' npm run keep
    ```
+
+   `npm run keep` joins, then keeps the bridge running from login (below); `npm start` is the
+   same in the terminal only.
 
    Or with `CHIPS_URL` and a code a person allows. Before it takes the link up, which works once,
    it checks there is a key, and that Hermes answers and takes it (`/v1/models`, since `/health`
