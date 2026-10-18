@@ -9,7 +9,7 @@
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { keepEnvironment, keepRunning, stopKeeping } from "@chipschat/harness";
+import { keepEnvironment, keepRunning, nodeOnPath, stopKeeping } from "@chipschat/harness";
 
 const flags = process.argv.slice(2);
 
@@ -45,7 +45,7 @@ export function keepIfAsked(label: string, url: string, names: readonly string[]
   if (!flags.includes("--keep")) return;
   const kept = keepRunning({
     label,
-    command: [process.execPath, "--import", "tsx", "src/main.ts", ...words.map(whole)],
+    command: [nodeOnPath(), "--import", "tsx", "src/main.ts", ...words.map(whole)],
     folder: here,
     environment: keepEnvironment(url, process.env, names),
   });
