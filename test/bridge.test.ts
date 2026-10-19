@@ -347,7 +347,11 @@ describe("a reply a person says wasn't right (Chips ADR 0200)", () => {
     assert.equal(started.payload["goal"], `Looking again: ${NOTE}`);
     assert.deepEqual(hermes.started.map((run) => run.sessionId), ["sess_1", "sess_1"], "the session it answered in");
     const told = hermes.started[1]?.input ?? "";
-    assert.ok(told.includes("says your reply in this room wasn't right.\n\nYour reply:\n«Here is the answer.»"), told);
+    // Its words name who gave the note, so they don't open with the name again ("Owner: Owner says").
+    const who = chips.workspace.owner.displayName;
+    assert.ok(told.startsWith(`${who} says your reply in this room wasn't right.\n\nYour reply:\n«Here is the answer.»`), told);
+    assert.ok(!told.includes(`${who}: `), told);
+    assert.match(hermes.started[0]?.input ?? "", new RegExp(`${who}: summarise the notes$`), "as any other turn's do");
     assert.ok(told.includes(`What wasn't right: «${NOTE}»`), told);
     // Nothing in the room but its new answer: Chips draws the note under the bubble itself.
     const said = chips.workspace.log.filter((event) => event.type === "message.post" && event.seq > given.seq);

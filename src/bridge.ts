@@ -162,6 +162,8 @@ interface Asked {
   readonly speakerId: string | undefined;
   /** What the thinking bubble says, when not the message's first line: a fix turn's (Chips ADR 0200). */
   readonly goal?: string | undefined;
+  /** Whether the words open with who said them: not a fix turn's, whose words name them already. */
+  readonly sayWho?: boolean | undefined;
 }
 
 interface Room {
@@ -351,7 +353,7 @@ export class Bridge {
   // ------------------------------------------------------------------ what is said to it
 
   /** A message for some of its agents: each takes a turn in its room, one after another there. */
-  private async hear(message: MessageNew, goal?: string): Promise<void> {
+  private async hear(message: MessageNew, how: Pick<Asked, "goal" | "sayWho"> = {}): Promise<void> {
     const spaceId = message.space_id;
     if (spaceId === undefined) return;
     const harnessId = this.options.chips.harnessId;
@@ -359,7 +361,7 @@ export class Bridge {
       const agent = await this.runnerOf(taker);
       if (agent === undefined) continue;
       const room = this.roomOf(agent, taker, spaceId);
-      room.queue.push({ message, speakerId: taker === harnessId ? undefined : taker, goal });
+      room.queue.push({ message, speakerId: taker === harnessId ? undefined : taker, ...how });
       void this.pump(room);
     }
   }
@@ -393,7 +395,7 @@ export class Bridge {
       from: feedback.from,
       ...(line === undefined ? {} : { for: [line.from.id] }),
     } as unknown as MessageNew;
-    await this.hear(message, lookingAgain(note));
+    await this.hear(message, { goal: lookingAgain(note), sayWho: false });
   }
 
   /**
@@ -444,7 +446,7 @@ export class Bridge {
     }
   }
 
-  private async turn(room: Room, { message, speakerId, goal }: Asked): Promise<void> {
+  private async turn(room: Room, { message, speakerId, goal, sayWho }: Asked): Promise<void> {
     const { agent, spaceId } = room;
     const speaker = speakerId === undefined ? this.options.chips : this.options.chips.as(speakerId);
     const run = await speaker.runs.start({ spaceId, goal: goal ?? goalOf(message, agent.config.name) });
@@ -481,7 +483,7 @@ export class Bridge {
     }
     const name = speakerId === undefined ? agent.config.name : await this.nameOf(speakerId, agent.config.name);
     turn.folder = this.folderOf(agent, speakerId ?? agent.agentId, name);
-    let text: string | undefined = promptFor(message, speakerId === undefined ? {} : { taker: speakerId });
+    let text: string | undefined = promptFor(message, { taker: speakerId, sayWho });
     for (let round = 0; text !== undefined && !turn.cancelled && !run.over; round += 1) {
       const last = await this.once(turn, session, text, `${run.id}:${round}`);
       if (last === undefined) return;
