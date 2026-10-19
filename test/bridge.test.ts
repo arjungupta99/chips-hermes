@@ -10,7 +10,8 @@ import { join } from "node:path";
 import { afterEach, describe, it } from "node:test";
 import { type FakeChips, type StoredEvent, startFakeChips } from "@chipschat/conformance";
 import { type Chips, connect, type Decision } from "@chipschat/harness";
-import { Bridge, type BridgeState, choiceOf, freeFolder, keyOf } from "../src/bridge.ts";
+import { type Feedback, messageIdOf, newId } from "@chipschat/protocol";
+import { Bridge, type BridgeState, choiceOf, freeFolder, keyOf, lookAgain, lookingAgain } from "../src/bridge.ts";
 import { type FakeHermes, startFakeHermes } from "./fake-hermes.ts";
 
 interface Rig {
@@ -30,7 +31,17 @@ afterEach(async () => {
 const AGENT = { name: "Hermes", profile: "default" } as const;
 
 async function rig(
-  options: { state?: BridgeState; chips?: FakeChips; hermes?: FakeHermes; profile?: string; model?: string; folder?: string; folders?: string } = {},
+  options: {
+    state?: BridgeState;
+    chips?: FakeChips;
+    hermes?: FakeHermes;
+    profile?: string;
+    model?: string;
+    folder?: string;
+    folders?: string;
+    /** What the bridge is handed in the client's place: a test's tap on it. */
+    chipsFor?: (client: Chips) => Chips;
+  } = {},
 ): Promise<Rig> {
   const chips = options.chips ?? (await startFakeChips({ capabilities: ["agents"] }));
   if (options.chips === undefined) open.push(() => chips.close());
@@ -40,7 +51,7 @@ async function rig(
   const state = options.state ?? { sessions: {} };
   const address = { url: hermes.url, key: hermes.key, profile: options.profile ?? AGENT.profile };
   const bridge = new Bridge({
-    chips: client,
+    chips: options.chipsFor?.(client) ?? client,
     agents: [
       {
         name: AGENT.name,
@@ -287,6 +298,159 @@ describe("a turn", () => {
     const words = await sent(chips, "message.post", (event) => event.run_id !== null);
     assert.equal(words.payload["text"], "Here is the answer.");
     await sent(chips, "run.completed");
+  });
+});
+
+// Chips offered "Not right?" on an agent's message, and Hermes's agents never heard it (ADR 0200).
+describe("a reply a person says wasn't right (Chips ADR 0200)", () => {
+  const NOTE = "Missed what I asked. Sunday is our flight home.";
+  const AGAIN = "Sunday it is: I moved the plan to Sunday, your flight home.";
+
+  /** The owner's "Not right?" on a message, as Chips hands it to the harness whose message it is. */
+  function notRight(
+    chips: FakeChips,
+    messageId: string,
+    what: { kind: "correction"; text: string } | { kind: "reaction"; reaction: string },
+    spaceId = chips.address.spaceId,
+  ): Promise<StoredEvent> {
+    const { participantId, displayName } = chips.workspace.owner;
+    return chips.asOwner({
+      type: "feedback",
+      space_id: spaceId,
+      message_id: messageId,
+      ...what,
+      from: { participant_id: participantId, kind: "person", display_name: displayName, role: "owner" },
+    });
+  }
+
+  /** The agent's answer to a first message, by the id a person's phone names it with. */
+  async function answered(chips: FakeChips): Promise<string> {
+    await chips.say("summarise the notes");
+    const words = await sent(chips, "message.post", (event) => event.run_id !== null);
+    await sent(chips, "run.completed");
+    return messageIdOf(words.id);
+  }
+
+  /** The run started after an event, and its end. */
+  async function ranAfter(chips: FakeChips, after: StoredEvent): Promise<StoredEvent> {
+    const started = await sent(chips, "run.started", (event) => event.seq > after.seq);
+    await sent(chips, "run.completed", (event) => event.run_id === started.run_id);
+    return started;
+  }
+
+  it("is a turn of the agent that said it, in its session there, its new answer a run in the room", async () => {
+    const { chips, agentId, hermes } = await rig();
+    const messageId = await answered(chips);
+    const given = await notRight(chips, messageId, { kind: "correction", text: NOTE });
+    const started = await ranAfter(chips, given);
+    assert.equal(started.actor.id, agentId, "the agent that said it");
+    assert.equal(started.payload["goal"], `Looking again: ${NOTE}`);
+    assert.deepEqual(hermes.started.map((run) => run.sessionId), ["sess_1", "sess_1"], "the session it answered in");
+    const told = hermes.started[1]?.input ?? "";
+    assert.ok(told.includes("says your reply in this room wasn't right.\n\nYour reply:\n«Here is the answer.»"), told);
+    assert.ok(told.includes(`What wasn't right: «${NOTE}»`), told);
+    // Nothing in the room but its new answer: Chips draws the note under the bubble itself.
+    const said = chips.workspace.log.filter((event) => event.type === "message.post" && event.seq > given.seq);
+    assert.deepEqual(
+      said.map((event) => [event.run_id, event.payload["text"]]),
+      [[started.run_id, AGAIN]],
+    );
+  });
+
+  it("goes to the agent that said it beside another in the room, in that agent's own session", async () => {
+    const chips = await startFakeChips({ capabilities: ["agents", "new_agents"] });
+    open.push(() => chips.close());
+    const { client, hermes, state } = await rig({ chips });
+    const room = await chips.openRoom("Plans");
+    for (const name of ["Nova", "Vega"]) {
+      const { askId } = await chips.askForAgent(room, name);
+      await sent(chips, "membership.added", (event) => event.payload["made_for"] === askId);
+    }
+    const vega = (await client.agents.list()).find((agent) => agent.name === "Vega")?.agentId ?? "";
+    await chips.say("summarise the notes", room);
+    await until(() => chips.workspace.log.filter((event) => event.type === "run.completed").length === 2);
+    const words = chips.workspace.log.find((event) => event.type === "message.post" && event.actor.id === vega);
+    assert.ok(words !== undefined, "Vega answered");
+    const given = await notRight(chips, messageIdOf(words.id), { kind: "correction", text: NOTE }, room);
+    const started = await ranAfter(chips, given);
+    assert.equal(started.actor.id, vega);
+    assert.equal(hermes.started.at(-1)?.sessionId, state.sessions[`${vega}|${room}`], "Vega's session, not Nova's");
+  });
+
+  it("does nothing for a 👍, another emoji, or a note with no words", async () => {
+    const { chips, hermes } = await rig();
+    const messageId = await answered(chips);
+    await notRight(chips, messageId, { kind: "reaction", reaction: "👍" });
+    await notRight(chips, messageId, { kind: "reaction", reaction: "🎉" });
+    await notRight(chips, messageId, { kind: "correction", text: "  " });
+    // The next message's turn is the next there is: none came between.
+    const next = await chips.say("one more");
+    await ranAfter(chips, next);
+    assert.equal(hermes.started.length, 2);
+    assert.match(hermes.started[1]?.input ?? "", /one more$/);
+  });
+
+  it("looks again at a bare 👎, from an older phone, without a note", async () => {
+    const { chips, hermes } = await rig();
+    const messageId = await answered(chips);
+    const given = await notRight(chips, messageId, { kind: "reaction", reaction: "👎" });
+    const started = await ranAfter(chips, given);
+    assert.equal(started.payload["goal"], "Looking again at its reply");
+    const told = hermes.started[1]?.input ?? "";
+    assert.ok(told.includes("Your reply:\n«Here is the answer.»"), told);
+    assert.ok(told.includes("They didn't say what. Read your reply again and find what was wrong."), told);
+    assert.doesNotMatch(told, /What wasn't right/);
+  });
+
+  it("takes one turn for an event heard twice", async () => {
+    // The bridge's own feedback handlers, so the same event can be handed over again, as a replay does.
+    const handlers: ((event: Feedback) => void)[] = [];
+    const chipsFor = (client: Chips): Chips =>
+      new Proxy(client, {
+        get(target, name) {
+          if (name === "on") {
+            return (type: "feedback", handler: (event: Feedback) => void) => {
+              if (type === "feedback") handlers.push(handler);
+              return target.on(type, handler);
+            };
+          }
+          const value: unknown = Reflect.get(target, name);
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+    const { chips, client, hermes } = await rig({ chipsFor });
+    const messageId = await answered(chips);
+    const heard: Feedback[] = [];
+    client.on("feedback", (event) => void heard.push(event));
+    const given = await notRight(chips, messageId, { kind: "correction", text: NOTE });
+    await until(() => heard.length === 1);
+    assert.equal(handlers.length, 1, "the bridge's own handler");
+    for (const handler of handlers) handler(heard[0] as Feedback);
+    await ranAfter(chips, given);
+    const next = await chips.say("one more");
+    await ranAfter(chips, next);
+    assert.equal(hermes.started.filter((run) => run.input.includes("wasn't right")).length, 1);
+    assert.equal(hermes.started.length, 3);
+  });
+
+  it("is the default agent's turn, without the reply, when the room doesn't have the message", async () => {
+    const { chips, agentId, hermes } = await rig();
+    await answered(chips);
+    const given = await notRight(chips, newId("message"), { kind: "correction", text: "That was wrong." });
+    const started = await ranAfter(chips, given);
+    assert.equal(started.actor.id, agentId, "the default agent");
+    assert.equal(hermes.started[1]?.sessionId, hermes.started[0]?.sessionId, "in its session there");
+    const told = hermes.started[1]?.input ?? "";
+    assert.doesNotMatch(told, /Your reply:/);
+    assert.ok(told.includes("What wasn't right: «That was wrong.»"), told);
+  });
+
+  it("shows at most 1500 characters of the reply, and gives the bubble at most 120 of the note", () => {
+    const shown = /«(.*?)»/s.exec(lookAgain("Ana", "a".repeat(2000), "Wrong."))?.[1] ?? "";
+    assert.deepEqual([shown.length, shown.at(-1)], [1500, "…"]);
+    const goal = lookingAgain(`\n${"b".repeat(200)}\nmore`);
+    assert.deepEqual([goal.length, goal.startsWith("Looking again: bbb"), goal.at(-1)], [120, true, "…"]);
+    assert.equal(lookingAgain(undefined), "Looking again at its reply");
   });
 });
 

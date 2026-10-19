@@ -7,6 +7,7 @@
  * - `fail` fails.
  * - `slow` writes until it is stopped.
  * - `drop` loses its stream midway and is read from its state.
+ * - A reply a person said wasn't right (Chips ADR 0200) is answered again.
  * - Anything else reads a file and answers.
  *
  * With `askFirst`, every run asks before it answers, as the golden scenario needs.
@@ -91,6 +92,11 @@ export async function startFakeHermes(options: { askFirst?: boolean } = {}): Pro
 
   const play = async (run: FakeRun) => {
     await sleep(20);
+    // Before the words are read: the fix turn's last line asks the agent to "ask them" when unsure.
+    if (run.input.includes("says your reply in this room wasn't right.")) {
+      const output = "Sunday it is: I moved the plan to Sunday, your flight home.";
+      return finish(run, "completed", { completed: true, output, usage, runtime: { model: "heron-2" } });
+    }
     // The person's words, the input's last line: not the room note before them, which may say "ask".
     const words = run.input.split("\n").at(-1) ?? "";
     if (options.askFirst === true || /\bask\b/.test(words)) {

@@ -21,6 +21,7 @@ Apache-2.0. Not published: a local repository until Chips's SDK is.
 | Files in the reply | each `MEDIA:<path>` line of its own in the reply, taken out of the words and sent from the agent's folder; a file outside it is refused, and the reply says so. Each run is told how in its `instructions`, which Hermes adds to the system prompt, over its own hint that its API server sends only pictures |
 | Cost | the run's tokens; a sub-agent's `cost_usd` as its step's share |
 | An approval card | `approval.request` → `POST …/approval`: once, session or always where Hermes offers it, else once; deny for a no. One answered in Hermes's own tools is settled in Chips (ADR 0079) |
+| "Not right?" on a reply (ADR 0200) | a run of the agent that said it, in its session in the room, after the room's other turns: told its reply and the person's note (or, for a bare 👎, that there was none), it answers again in its place |
 | Stop | `POST …/stop` |
 | A steer, a follow-up, an interrupt | `POST …/steer`; the next run of the turn; stop, then the next run with the words |
 | Trouble on the harness | `GET /health` every 30 s, per profile |

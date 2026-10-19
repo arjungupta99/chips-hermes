@@ -15,6 +15,9 @@
  * - At the end come its words in the room and its tokens. A sub-agent's cost is the step's.
  * - Stop is `POST …/stop`, and a steer is `POST …/steer`.
  *
+ * A reply a person says wasn't right ("Not right?", Chips ADR 0200) is a turn of the agent that
+ * said it, in the same session: shown its reply and the note, it answers again in its place.
+ *
  * Hermes can't be told anything outside a run, and keeps no schedule this bridge reads yet, so
  * neither is claimed.
  */
@@ -23,7 +26,7 @@ import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import type { Agent, Chips, Decision, Run, Speaker } from "@chipschat/harness";
 import { promptFor, SENDING_FILES, sendAnswer } from "@chipschat/harness";
-import { type AgentAsked, createIdGenerator, type MessageNew, type StepKind } from "@chipschat/protocol";
+import { type AgentAsked, createIdGenerator, type Feedback, type MessageNew, messageIdOf, type StepKind } from "@chipschat/protocol";
 import { HermesClient, HermesError, type ProfileAddress, type RunEvent, TERMINAL } from "./hermes.js";
 
 export interface AgentConfig {
@@ -114,6 +117,8 @@ const ids = createIdGenerator();
 const QUIET_MS = 1500;
 /** How long the end of a run whose stream was lost is waited for, read from its state. */
 const LOST_STREAM_MS = 120_000;
+/** How many feedback events are remembered as answered, so one heard again is no second turn. */
+const KEPT_FEEDBACK = 500;
 
 /**
  * What kind of call each of Hermes's own tools is, in Chips's words (Chips ADR 0162), so the
@@ -155,6 +160,8 @@ interface Asked {
   readonly message: MessageNew;
   /** The Chips agent it was for, or none where Chips named only the harness. */
   readonly speakerId: string | undefined;
+  /** What the thinking bubble says, when not the message's first line: a fix turn's (Chips ADR 0200). */
+  readonly goal?: string | undefined;
 }
 
 interface Room {
@@ -203,6 +210,8 @@ export class Bridge {
   private ours = new Set<string>();
   /** The harness's agents' names, by Chips id, for the folders named after them. */
   private readonly names = new Map<string, string>();
+  /** The feedback events answered with a turn, the newest `KEPT_FEEDBACK`. */
+  private readonly lookedAt = new Set<string>();
   private readonly log: (line: string) => void;
   private health: ReturnType<typeof setInterval> | undefined;
 
@@ -225,6 +234,9 @@ export class Bridge {
     chips.on("message.new", (message) => void this.hear(message));
     chips.on("agent.asked", (asked) => {
       this.make(asked).catch((error: unknown) => this.log(`a new agent went wrong: ${messageOf(error)}`));
+    });
+    chips.on("feedback", (feedback) => {
+      this.notRight(feedback).catch((error: unknown) => this.log(`a note on a reply went wrong: ${messageOf(error)}`));
     });
     await this.sayHowItIs();
     this.health = setInterval(() => void this.sayHowItIs(), this.options.healthEveryMs ?? 30_000);
@@ -339,7 +351,7 @@ export class Bridge {
   // ------------------------------------------------------------------ what is said to it
 
   /** A message for some of its agents: each takes a turn in its room, one after another there. */
-  private async hear(message: MessageNew): Promise<void> {
+  private async hear(message: MessageNew, goal?: string): Promise<void> {
     const spaceId = message.space_id;
     if (spaceId === undefined) return;
     const harnessId = this.options.chips.harnessId;
@@ -347,9 +359,41 @@ export class Bridge {
       const agent = await this.runnerOf(taker);
       if (agent === undefined) continue;
       const room = this.roomOf(agent, taker, spaceId);
-      room.queue.push({ message, speakerId: taker === harnessId ? undefined : taker });
+      room.queue.push({ message, speakerId: taker === harnessId ? undefined : taker, goal });
       void this.pump(room);
     }
+  }
+
+  /**
+   * "Not right?" on one of its agents' replies (Chips ADR 0200): a person's note on it, or a bare
+   * 👎 from an older phone, is a turn of the agent that said it, in its session in that room and
+   * in line with the room's other turns, to look again and answer in its place. Any other
+   * reaction is the person's own. Once per event, however often it is heard.
+   */
+  private async notRight(feedback: Feedback): Promise<void> {
+    const { space_id: spaceId, message_id: messageId } = feedback;
+    const note = feedback.kind === "correction" ? (feedback.text ?? "").trim() : undefined;
+    const flagged = note === undefined ? feedback.kind === "reaction" && feedback.reaction === "👎" : note !== "";
+    if (spaceId === undefined || !messageId || !flagged || this.lookedAt.has(feedback.id)) return;
+    this.lookedAt.add(feedback.id);
+    for (const old of this.lookedAt) {
+      if (this.lookedAt.size <= KEPT_FEEDBACK) break;
+      this.lookedAt.delete(old);
+    }
+    // The event doesn't say whose reply it was: the room's lines do, and what it said. A reply
+    // not among them is the default agent's to answer, as a message for nobody in particular is.
+    const context = await this.options.chips.roomContext(spaceId, { limit: 200 }).catch(() => undefined);
+    const line = context?.lines.find((each) => each.message_id === messageId);
+    const message = {
+      type: "message.new",
+      space_id: spaceId,
+      // An id of its own, so nothing of the turn is taken for the reply's.
+      message_id: messageIdOf(feedback.id),
+      text: lookAgain(feedback.from.display_name, line?.text, note),
+      from: feedback.from,
+      ...(line === undefined ? {} : { for: [line.from.id] }),
+    } as unknown as MessageNew;
+    await this.hear(message, lookingAgain(note));
   }
 
   /**
@@ -400,10 +444,10 @@ export class Bridge {
     }
   }
 
-  private async turn(room: Room, { message, speakerId }: Asked): Promise<void> {
+  private async turn(room: Room, { message, speakerId, goal }: Asked): Promise<void> {
     const { agent, spaceId } = room;
     const speaker = speakerId === undefined ? this.options.chips : this.options.chips.as(speakerId);
-    const run = await speaker.runs.start({ spaceId, goal: goalOf(message, agent.config.name) });
+    const run = await speaker.runs.start({ spaceId, goal: goal ?? goalOf(message, agent.config.name) });
     const turn: Turn = {
       run,
       speaker,
@@ -774,6 +818,37 @@ export function goalOf(message: MessageNew, name: string): string {
   const named = first.toLowerCase().startsWith(`@${name.toLowerCase()}`);
   const goal = named ? first.slice(name.length + 1).trim() : first.replace(/^@\S+\s*/, "");
   return (goal === "" ? `Answer ${message.from.display_name}` : goal).slice(0, 300);
+}
+
+/** The most of a reply a fix turn is shown again. */
+const REPLY_SHOWN = 1500;
+/** The most of a fix turn's goal the thinking bubble is given. */
+const GOAL_SHOWN = 120;
+
+/**
+ * What an agent is told when a person says its reply wasn't right (Chips ADR 0200): the reply,
+ * when the room still has its words, and the note, or that there was none (a bare 👎).
+ */
+export function lookAgain(who: string, reply: string | undefined, note: string | undefined): string {
+  const said = reply?.trim() ?? "";
+  return [
+    `${who} says your reply in this room wasn't right.`,
+    ...(said === "" ? [] : [`Your reply:\n«${cut(said, REPLY_SHOWN)}»`]),
+    note === undefined || note === ""
+      ? "They didn't say what. Read your reply again and find what was wrong."
+      : `What wasn't right: «${note}»`,
+    "Look at it again and answer properly in its place. If it is not clear what was wrong, ask them in one short line. Say plainly what you changed.",
+  ].join("\n\n");
+}
+
+/** A fix turn's goal: the note's first line, or that it looks again where there is no note. */
+export function lookingAgain(note: string | undefined): string {
+  const first = note?.split("\n").find((line) => line.trim() !== "")?.trim();
+  return first === undefined ? "Looking again at its reply" : cut(`Looking again: ${first}`, GOAL_SHOWN);
+}
+
+function cut(text: string, most: number): string {
+  return text.length <= most ? text : `${text.slice(0, most - 1)}…`;
 }
 
 /**
