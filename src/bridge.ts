@@ -768,16 +768,29 @@ export class Bridge {
     }
   }
 
-  /** The tokens Hermes counted, as a step's share, so they add up over the turn's runs. */
+  /**
+   * The tokens Hermes counted, as a step's share, so they add up over the turn's runs. Hermes's
+   * `input_tokens` is already every token in, its cache's reads and writes among them (its
+   * `CanonicalUsage.prompt_tokens`), which is what Chips counts (Chips ADR 0214); the cache's two
+   * counts go with it, and are left out where Hermes doesn't say them.
+   */
   private async counted(turn: Turn, last: RunEvent): Promise<void> {
     const usage = (last["usage"] ?? {}) as Record<string, unknown>;
-    const input = typeof usage["input_tokens"] === "number" ? usage["input_tokens"] : 0;
-    const output = typeof usage["output_tokens"] === "number" ? usage["output_tokens"] : 0;
+    const count = (key: string) => (typeof usage[key] === "number" ? usage[key] : undefined);
+    const input = count("input_tokens") ?? 0;
+    const output = count("output_tokens") ?? 0;
     if (input + output === 0) return;
     const runtime = (last["runtime"] ?? {}) as Record<string, unknown>;
     const model = typeof runtime["model"] === "string" ? runtime["model"] : (turn.agent.config.model ?? "hermes");
     await turn.run
-      .usage({ scope: "step", model, inputTokens: input, outputTokens: output })
+      .usage({
+        scope: "step",
+        model,
+        inputTokens: input,
+        cacheReadTokens: count("cache_read_tokens"),
+        cacheWriteTokens: count("cache_write_tokens"),
+        outputTokens: output,
+      })
       .catch(() => undefined);
   }
 

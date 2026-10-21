@@ -10,7 +10,8 @@
  * - A reply a person said wasn't right (Chips ADR 0200) is answered again.
  * - Anything else reads a file and answers.
  *
- * With `askFirst`, every run asks before it answers, as the golden scenario needs.
+ * With `askFirst`, every run asks before it answers, as the golden scenario needs. With `usage`, a
+ * run's end says it counted that, in place of Hermes 0.22.0's counts.
  */
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
@@ -53,7 +54,9 @@ export interface FakeHermes {
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-export async function startFakeHermes(options: { askFirst?: boolean } = {}): Promise<FakeHermes> {
+export async function startFakeHermes(
+  options: { askFirst?: boolean; usage?: Record<string, number> } = {},
+): Promise<FakeHermes> {
   const key = "hermes-test-key";
   const runs = new Map<string, FakeRun>();
   let count = 0;
@@ -88,7 +91,14 @@ export async function startFakeHermes(options: { askFirst?: boolean } = {}): Pro
       };
       emit(run, "approval.request", fields);
     });
-  const usage = { input_tokens: 1200, output_tokens: 40, total_tokens: 1240, cache_read_tokens: 0, cache_write_tokens: 0 };
+  // As Hermes 0.22.0 counts: its input_tokens holds the cache's reads and writes (100 fresh here).
+  const usage = options.usage ?? {
+    input_tokens: 1200,
+    output_tokens: 40,
+    total_tokens: 1240,
+    cache_read_tokens: 900,
+    cache_write_tokens: 200,
+  };
 
   const play = async (run: FakeRun) => {
     await sleep(20);

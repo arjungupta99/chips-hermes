@@ -256,6 +256,24 @@ describe("a turn", () => {
     assert.match(hermes.started[0]?.input ?? "", /summarise the notes$/);
   });
 
+  it("counts every token in, and says how many of them the cache held (Chips ADR 0214)", async () => {
+    const { chips } = await rig();
+    await chips.say("summarise the notes");
+    const usage = await sent(chips, "usage");
+    assert.deepEqual(
+      [usage.payload["input_tokens"], usage.payload["cache_read_tokens"], usage.payload["cache_write_tokens"]],
+      [1200, 900, 200],
+      "Hermes's own count, the cache already in it",
+    );
+    const older = await startFakeHermes({ usage: { input_tokens: 1200, output_tokens: 40, total_tokens: 1240 } });
+    open.push(() => older.close());
+    const plain = await rig({ hermes: older });
+    await plain.chips.say("summarise the notes");
+    const said = await sent(plain.chips, "usage");
+    assert.equal(said.payload["input_tokens"], 1200);
+    assert.ok(!("cache_read_tokens" in said.payload) && !("cache_write_tokens" in said.payload), "left out, not 0");
+  });
+
   it("keeps one Hermes session per room, and a second message is the same session", async () => {
     const { chips, hermes, state } = await rig();
     await chips.say("one");
@@ -349,9 +367,11 @@ describe("a reply a person says wasn't right (Chips ADR 0200)", () => {
     const told = hermes.started[1]?.input ?? "";
     // Its words name who gave the note, so they don't open with the name again ("Owner: Owner says").
     const who = chips.workspace.owner.displayName;
+    // Any other turn's words say who with their standing in the workspace (Chips SEC-15).
+    const named = `${who} (owner): `;
     assert.ok(told.startsWith(`${who} says your reply in this room wasn't right.\n\nYour reply:\n«Here is the answer.»`), told);
-    assert.ok(!told.includes(`${who}: `), told);
-    assert.match(hermes.started[0]?.input ?? "", new RegExp(`${who}: summarise the notes$`), "as any other turn's do");
+    assert.ok(!told.includes(named), told);
+    assert.ok((hermes.started[0]?.input ?? "").endsWith(`${named}summarise the notes`), "as any other turn's do");
     assert.ok(told.includes(`What wasn't right: «${NOTE}»`), told);
     // Nothing in the room but its new answer: Chips draws the note under the bubble itself.
     const said = chips.workspace.log.filter((event) => event.type === "message.post" && event.seq > given.seq);
