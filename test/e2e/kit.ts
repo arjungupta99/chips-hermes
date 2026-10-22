@@ -50,7 +50,10 @@ export const skip: string | false = existsSync(kit)
   ? false
   : `no Chips checkout with tools/connect-kit at ${repo}: set CHIPS_REPO to one`;
 
-/** This checkout: where a card's command runs in these tests, not the folder its `cd` names. */
+/**
+ * This checkout: packed by the kit and served from a stand-in npm registry to the card's
+ * `chips connect` (Chips ADR 0218), as npm will serve it once it is published.
+ */
 export const here = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 
 export async function scratchChips(): Promise<ScratchChips> {
