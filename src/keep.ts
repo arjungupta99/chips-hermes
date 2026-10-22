@@ -4,12 +4,16 @@
  * that runs `npm start`'s bridge from login and again whenever it stops, and this copy ends:
  * closing the terminal, or restarting the machine, no longer takes the harness offline in Chips.
  * `npm run keep -- --stop` stops it and removes the file.
+ *
+ * `chips connect <id> '<link>'` runs the published bundle with `--keep` (Chips ADR 0218), and hands
+ * over the Node to keep it on (`CHIPS_NODE`, a path an upgrade of Chips keeps) and the line that
+ * stops it (`CHIPS_STOP_COMMAND`, `chips disconnect <id>`).
  */
 
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { keepEnvironment, keepRunning, nodeOnPath, stopKeeping } from "@chipschat/harness";
+import { keepEnvironment, keepRunning, keptNode, stopKeeping } from "@chipschat/harness";
 
 const flags = process.argv.slice(2);
 
@@ -22,12 +26,18 @@ const whole = (word: string) => resolve(word.startsWith("~/") ? join(homedir(), 
 /** This repository, or the installed package, where the kept bridge runs from. */
 const here = fileURLToPath(new URL("..", import.meta.url)).replace(/\/$/, "");
 
-/** Its bundle, as the published package runs (`dist/main.js`); else its source, run by tsx. */
+/**
+ * Its bundle, as the published package runs (`dist/main.js`), only for a file named `.js`; else its
+ * source, run by tsx, as in a checkout.
+ */
 const self = fileURLToPath(import.meta.url);
 const run = self.endsWith(".js") ? [self] : ["--import", "tsx", "src/main.ts"];
 
 /** What a person types to run it again: `npm run keep --` in a checkout, else the command itself. */
 const again = process.env["npm_lifecycle_event"] === "keep" ? "npm run keep --" : basename(process.argv[1] ?? "chips");
+
+/** What stops it: what `chips connect` says it is, else this command again with `--stop`. */
+const stopLine = process.env["CHIPS_STOP_COMMAND"] || [again, ...words, "--stop"].join(" ");
 
 const end = (line: string, code: number): never => {
   (code === 0 ? process.stdout : process.stderr).write(`${line}\n`);
@@ -56,16 +66,17 @@ export function keepIfAsked(
   before: () => void = () => undefined,
 ): void {
   if (!flags.includes("--keep")) return;
+  const node = keptNode();
   const kept = keepRunning({
     label,
-    command: [nodeOnPath(), ...run, ...words.map(whole)],
+    command: [node, ...run, ...words.map(whole)],
     folder: here,
-    environment: keepEnvironment(url, process.env, names),
+    environment: keepEnvironment(url, process.env, names, node),
   });
   if (kept.state === "kept") {
     before();
     end(
-      `Kept running as ${label}: it starts at login, and again whenever it stops. What it says goes to ${kept.logFile}. \`${[again, ...words, "--stop"].join(" ")}\` stops it.`,
+      `Kept running as ${label}: it starts at login, and again whenever it stops. What it says goes to ${kept.logFile}. \`${stopLine}\` stops it.`,
       0,
     );
   }

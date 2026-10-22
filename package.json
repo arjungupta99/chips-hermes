@@ -1,6 +1,6 @@
 {
   "name": "@chipschat/hermes",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Hermes Agent as a Chips harness, on its Runs API: each profile a Chips agent, each room a Hermes session.",
   "license": "Apache-2.0",
   "type": "module",
@@ -24,8 +24,9 @@
     "test": "node --import tsx --test test/*.test.ts",
     "e2e": "node --import tsx --test test/e2e/*.test.ts",
     "typecheck": "tsc --noEmit",
-    "build": "esbuild src/main.ts --bundle --platform=node --target=node22 --format=esm --outfile=dist/main.js --log-level=warning --banner:js='#!/usr/bin/env node'",
-    "prepack": "npm run build"
+    "build": "node scripts/build.mjs",
+    "prepack": "npm run build",
+    "release": "npm run build && npm test && npm pack"
   },
   "devDependencies": {
     "@chipschat/conformance": "file:vendor/chipschat-conformance-0.0.0.tgz",
