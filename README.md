@@ -63,7 +63,7 @@ hasn't been tried through Chips yet.
    this line with the link in it:
 
    ```
-   cd ~/Work/chips-hermes && CHIPS_JOIN_LINK='<link>' npm run keep
+   cd ~/Work/Chips/chips-hermes && CHIPS_JOIN_LINK='<link>' npm run keep
    ```
 
    `npm run keep` joins, then keeps the bridge running from login (below); `npm start` is the
@@ -118,7 +118,7 @@ npm run e2e
 ```
 
 The gallery's card for this connector, run as a person runs it, against a scratch Chips from a
-Chips checkout (`CHIPS_REPO`, `~/Work/Chips` unless set; skipped without one) and the same scripted Hermes.
+Chips checkout (`CHIPS_REPO`, `~/Work/Chips/chips-main` unless set; skipped without one) and the same scripted Hermes.
 Each thing not set up stops it with the link still good; then it joins with what the card grants,
 says hello once in its room, says nothing more started again, and takes up a new link in place of
 the key it kept. The scratch Chips, the link and the run come from Chips's `tools/connect-kit`.

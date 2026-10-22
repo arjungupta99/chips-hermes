@@ -1,7 +1,7 @@
 /**
  * Chips's connect kit (its `tools/connect-kit`), loaded from a Chips checkout: a scratch Chips, a
  * gallery card's link made as Chips's Join page makes it, and the card's command run as a person
- * runs it. `CHIPS_REPO` names the checkout, `~/Work/Chips` unless set; with none there, the
+ * runs it. `CHIPS_REPO` names the checkout, `~/Work/Chips/chips-main` unless set; with none there, the
  * end-to-end tests are skipped and say why.
  */
 
@@ -42,7 +42,7 @@ export interface ScratchChips {
   stop(): Promise<void>;
 }
 
-const repo = process.env["CHIPS_REPO"] ?? join(homedir(), "Work", "Chips");
+const repo = process.env["CHIPS_REPO"] ?? join(homedir(), "Work", "Chips", "chips-main");
 const kit = join(repo, "tools", "connect-kit", "kit.mts");
 
 /** Why the end-to-end tests can't run here, or false when they can. */
