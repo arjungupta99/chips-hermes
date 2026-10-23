@@ -10,6 +10,11 @@
  * - A reply a person said wasn't right (Chips ADR 0200) is answered again.
  * - Anything else reads a file and answers.
  *
+ * Each session keeps what was said in it, which a run is shown as it starts. A session is forked
+ * as Hermes 0.22.0 forks one (`POST /api/sessions/{id}/fork`): the copy made, the original ended
+ * as `branched`, then the title, refused when another session has it. `compress` moves a session
+ * on to a new id, as Hermes's compression does, which a run naming the old id is taken to.
+ *
  * With `askFirst`, every run asks before it answers, as the golden scenario needs. With `usage`, a
  * run's end says it counted that, in place of Hermes 0.22.0's counts.
  */
@@ -28,6 +33,8 @@ interface FakeRun {
   answer?: (choice: string) => void;
   output?: string;
   drop?: boolean;
+  /** The session it is in, where its words and answer are kept. */
+  session?: string;
 }
 
 export interface Started {
@@ -38,6 +45,17 @@ export interface Started {
   readonly instructions: string | undefined;
   readonly profile: string;
   readonly idempotencyKey: string | undefined;
+  /** What its session held when it started: each run's input, then its answer. */
+  readonly history: readonly string[];
+}
+
+/** A fork Hermes was asked for: of which session, under which id, on which profile, and whether made. */
+export interface Forked {
+  readonly from: string;
+  readonly id: string | undefined;
+  readonly title: string | undefined;
+  readonly profile: string;
+  readonly made: boolean;
 }
 
 export interface FakeHermes {
@@ -48,7 +66,12 @@ export interface FakeHermes {
   readonly answers: Record<string, unknown>[];
   readonly steers: string[];
   readonly stops: string[];
+  readonly forks: Forked[];
+  /** The sessions ended, and why: `branched` for a fork's original. */
+  readonly ended: Map<string, string>;
   up: boolean;
+  /** The session compressed: it goes on under a new id with what it held. The new id. */
+  compress(sessionId: string): string;
   close(): Promise<void>;
 }
 
@@ -62,6 +85,15 @@ export async function startFakeHermes(
   let count = 0;
   /** Each session's title, as Hermes keeps it: no two sessions share one. */
   const titles = new Map<string, string>();
+  /** What each session holds. */
+  const histories = new Map<string, string[]>();
+  /** A compressed session → the id it goes on under. */
+  const continued = new Map<string, string>();
+  const latestOf = (id: string): string => {
+    let at = id;
+    while (continued.has(at)) at = continued.get(at) ?? at;
+    return at;
+  };
   const fake: Omit<FakeHermes, "url" | "close"> = {
     key,
     started: [],
@@ -69,7 +101,17 @@ export async function startFakeHermes(
     answers: [],
     steers: [],
     stops: [],
+    forks: [],
+    ended: new Map(),
     up: true,
+    compress: (sessionId) => {
+      const from = latestOf(sessionId);
+      const next = `${from}~`;
+      histories.set(next, [...(histories.get(from) ?? [])]);
+      continued.set(from, next);
+      fake.ended.set(from, "compression");
+      return next;
+    },
   };
 
   const emit = (run: FakeRun, event: string, fields: Record<string, unknown> = {}) => {
@@ -80,6 +122,7 @@ export async function startFakeHermes(
   const finish = (run: FakeRun, status: string, fields: Record<string, unknown>) => {
     if (["completed", "failed", "cancelled"].includes(run.status)) return;
     run.status = status;
+    if (run.session !== undefined && typeof fields["output"] === "string") histories.get(run.session)?.push(fields["output"]);
     emit(run, `run.${status}`, fields);
   };
   const asked = (run: FakeRun, fields: Record<string, unknown>) =>
@@ -213,15 +256,50 @@ export async function startFakeHermes(
         }
         const id = `sess_${fake.sessions.length + 1}`;
         fake.sessions.push(id);
+        histories.set(id, []);
         if (title !== "") titles.set(title, id);
         return json(response, 200, { id });
+      }
+      const forked = /^\/api\/sessions\/([^/]+)\/fork$/.exec(path);
+      if (method === "POST" && forked !== null) {
+        const from = decodeURIComponent(forked[1] ?? "");
+        const body = await bodyOf(request);
+        const asked = typeof body["id"] === "string" ? body["id"] : undefined;
+        const title = typeof body["title"] === "string" ? body["title"] : undefined;
+        const made = !histories.has(asked ?? "") && histories.has(from);
+        fake.forks.push({ from, id: asked, title, profile, made });
+        if (!histories.has(from)) return json(response, 404, { error: { message: `Session not found: ${from}` } });
+        const id = asked ?? `fork_${fake.forks.length}`;
+        if (histories.has(id)) return json(response, 409, { error: { message: `Session already exists: ${id}`, code: "session_exists" } });
+        // As Hermes: the copy first, then the original ended, then the title, which may be refused.
+        histories.set(id, [...(histories.get(from) ?? [])]);
+        if (!fake.ended.has(from)) fake.ended.set(from, "branched");
+        const taken = title === undefined ? undefined : titles.get(title);
+        if (taken !== undefined) {
+          return json(response, 400, { error: { message: `Title '${title}' is already in use by session ${taken}`, code: "invalid_title" } });
+        }
+        if (title !== undefined) titles.set(title, id);
+        return json(response, 201, { object: "hermes.session", session: { id, parent_session_id: from, title } });
+      }
+      const messages = /^\/api\/sessions\/([^/]+)\/messages$/.exec(path);
+      if (method === "GET" && messages !== null) {
+        const id = decodeURIComponent(messages[1] ?? "");
+        if (!histories.has(id)) return json(response, 404, { error: { message: `Session not found: ${id}` } });
+        const latest = latestOf(id);
+        return json(response, 200, { object: "list", session_id: latest, data: histories.get(latest) ?? [] });
       }
       if (method === "POST" && path === "/v1/runs") {
         const body = await bodyOf(request);
         count += 1;
         const run: FakeRun = { id: `run_${count}`, input: String(body["input"]), status: "running", events: [], listeners: new Set() };
         runs.set(run.id, run);
+        // A run naming a compressed session goes on in its latest, as Hermes's `/v1/runs` does.
+        const named = typeof body["session_id"] === "string" ? body["session_id"] : undefined;
+        if (named !== undefined) run.session = latestOf(named);
+        const history = run.session === undefined ? [] : (histories.get(run.session) ?? []);
+        if (run.session !== undefined) histories.set(run.session, [...history, run.input]);
         fake.started.push({
+          history: [...history],
           input: run.input,
           sessionId: typeof body["session_id"] === "string" ? body["session_id"] : undefined,
           model: typeof body["model"] === "string" ? body["model"] : undefined,

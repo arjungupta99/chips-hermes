@@ -10,8 +10,19 @@ import { join } from "node:path";
 import { afterEach, describe, it } from "node:test";
 import { type FakeChips, type StoredEvent, startFakeChips } from "@chipschat/conformance";
 import { type Chips, connect, type Decision } from "@chipschat/harness";
-import { type Feedback, messageIdOf, newId } from "@chipschat/protocol";
-import { Bridge, type BridgeState, choiceOf, freeFolder, keyOf, lookAgain, lookingAgain } from "../src/bridge.ts";
+import { type AgentFork, type Feedback, messageIdOf, newId } from "@chipschat/protocol";
+import {
+  Bridge,
+  type BridgeState,
+  choiceOf,
+  forkName,
+  freeFolder,
+  keyOf,
+  lookAgain,
+  lookingAgain,
+  WANTS,
+} from "../src/bridge.ts";
+import { HermesClient } from "../src/hermes.ts";
 import { type FakeHermes, startFakeHermes } from "./fake-hermes.ts";
 
 interface Rig {
@@ -21,6 +32,8 @@ interface Rig {
   readonly hermes: FakeHermes;
   readonly state: BridgeState;
   readonly agentId: string;
+  /** What the bridge logged. */
+  readonly logs: string[];
 }
 
 const open: (() => Promise<void>)[] = [];
@@ -39,6 +52,8 @@ async function rig(
     model?: string;
     folder?: string;
     folders?: string;
+    /** More profiles, after the first. */
+    also?: readonly { name: string; profile: string }[];
     /** What the bridge is handed in the client's place: a test's tap on it. */
     chipsFor?: (client: Chips) => Chips;
   } = {},
@@ -50,6 +65,7 @@ async function rig(
   const client = await connect({ url: chips.address.url, token: chips.address.token });
   const state = options.state ?? { sessions: {} };
   const address = { url: hermes.url, key: hermes.key, profile: options.profile ?? AGENT.profile };
+  const logs: string[] = [];
   const bridge = new Bridge({
     chips: options.chipsFor?.(client) ?? client,
     agents: [
@@ -59,19 +75,21 @@ async function rig(
         ...(options.model === undefined ? {} : { model: options.model }),
         ...(options.folder === undefined ? {} : { folder: options.folder }),
       },
+      ...(options.also ?? []).map(({ name, profile }) => ({ name, address: { ...address, profile } })),
     ],
     home: chips.address.spaceId,
     ...(options.folders === undefined ? {} : { folders: options.folders }),
     state,
     saveState: () => undefined,
     healthEveryMs: 50,
+    log: (line) => void logs.push(line),
   });
   open.push(async () => {
     bridge.stop();
     client.close();
   });
   await bridge.start();
-  return { chips, client, bridge, hermes, state, agentId: bridge.mainAgentId ?? "" };
+  return { chips, client, bridge, hermes, state, agentId: bridge.mainAgentId ?? "", logs };
 }
 
 async function until(done: () => boolean, timeoutMs = 3000): Promise<void> {
@@ -157,6 +175,241 @@ describe("a new agent a person asks for (Chips ADR 0108)", () => {
     assert.deepEqual([...took].sort(), [...made].sort(), "each took its turn as itself");
     assert.equal(new Set(hermes.started.map((run) => run.sessionId)).size, 2, "two Hermes sessions");
     assert.deepEqual(Object.keys(state.sessions).sort(), made.map((id) => `${id}|${room}`).sort());
+  });
+});
+
+// Chips offered Fork for the other harnesses' agents, and Hermes's made no copies (Chips ADR 0087).
+describe("a copy a person asks for (Chips ADR 0087, Fork)", () => {
+  /** A Chips that offers Fork, the bridge, and Nova, asked for in a room of the owner's. */
+  async function withNova(options: Parameters<typeof rig>[0] = {}) {
+    const chips = await startFakeChips({ capabilities: ["agents", "new_agents", "forks"] });
+    open.push(() => chips.close());
+    const root = mkdtempSync(join(tmpdir(), "chips-hermes-forks-"));
+    open.push(async () => rmSync(root, { recursive: true, force: true }));
+    const made = await rig({ chips, folders: root, ...options });
+    const room = await chips.openRoom("Plans");
+    const { askId } = await chips.askForAgent(room, "Nova");
+    const joined = await sent(chips, "membership.added", (event) => event.payload["made_for"] === askId);
+    return { ...made, room, nova: String(joined.payload["participant_id"]) };
+  }
+
+  /** Words said in a room, and the turn they were, to its end. */
+  async function said(chips: FakeChips, words: string, room: string): Promise<void> {
+    const asked = await chips.say(words, room);
+    const started = await sent(chips, "run.started", (event) => event.seq > asked.seq && event.space_id === room);
+    await sent(chips, "run.completed", (event) => event.run_id === started.run_id);
+  }
+
+  /** A copy of an agent asked for in a room of its own, and joined there. */
+  async function forked(chips: FakeChips, agentId: string) {
+    const second = await chips.openRoom("Second opinion");
+    const { forkId } = await chips.askForFork(agentId, second);
+    const joined = await sent(chips, "membership.added", (event) => event.payload["fork_of"] === forkId);
+    return { second, forkId, copy: String(joined.payload["participant_id"]) };
+  }
+
+  /** The bridge's own fork handlers, so an ask can be handed over again, or made up. */
+  function tapped(handlers: ((event: AgentFork) => void)[]) {
+    return (client: Chips): Chips =>
+      new Proxy(client, {
+        get(target, name) {
+          if (name === "on") {
+            return (type: "agent.fork", handler: (event: AgentFork) => void) => {
+              if (type === "agent.fork") handlers.push(handler);
+              return target.on(type, handler);
+            };
+          }
+          const value: unknown = Reflect.get(target, name);
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+  }
+
+  it("forks the agent's session in Hermes, which the copy answers in, in its original's folder", async () => {
+    const { chips, client, hermes, state, room, nova } = await withNova();
+    await said(chips, "plan the trip", room);
+    const kept = state.sessions[`${nova}|${room}`] ?? "";
+    const { second, forkId, copy } = await forked(chips, nova);
+    const agent = (await client.agents.list()).find((each) => each.agentId === copy);
+    assert.deepEqual([agent?.name, agent?.forkedFrom, agent?.spaces], ["Nova · fork", nova, [second]]);
+    const id = `chips-fork-${forkId}`;
+    assert.deepEqual(
+      hermes.forks.map((each) => [each.from, each.id, each.made]),
+      [[kept, id, true]],
+    );
+    assert.equal(hermes.forks[0]?.title, `Chips room ${second} · hermes:fork:${forkId}`, "a title no other session has");
+    assert.equal(hermes.ended.get(kept), "branched", "as Hermes's fork leaves it");
+    assert.equal(state.sessions[`${copy}|${second}`], id);
+    assert.equal(state.profiles?.[copy], keyOf({ name: AGENT.name, address: { url: hermes.url, key: hermes.key, profile: "default" } }));
+    const folder = state.folders?.[nova] ?? "";
+    assert.equal(state.folders?.[copy], folder, "the files of the conversation it remembers");
+    await said(chips, "what did we plan?", second);
+    const ran = hermes.started.at(-1);
+    assert.equal(ran?.sessionId, id);
+    assert.match(ran?.history[0] ?? "", /plan the trip$/, "it remembers");
+    assert.ok(ran?.instructions?.includes(`Your own folder is ${folder}:`), ran?.instructions);
+    assert.equal(hermes.sessions.length, 1, "no new session for the copy");
+  });
+
+  it("goes on apart from its original, each in its own session", async () => {
+    const { chips, hermes, state, room, nova } = await withNova();
+    await said(chips, "plan the trip", room);
+    const { second, copy } = await forked(chips, nova);
+    await said(chips, "make it Lisbon", room);
+    await said(chips, "make it Porto", second);
+    const [lisbon, porto] = hermes.started.slice(-2);
+    // The original's session, ended by the fork, still takes its turns, as Hermes's does.
+    assert.equal(lisbon?.sessionId, state.sessions[`${nova}|${room}`]);
+    assert.equal(porto?.sessionId, state.sessions[`${copy}|${second}`]);
+    assert.ok(!porto?.history.some((each) => each.endsWith("make it Lisbon")), "the copy didn't hear the original");
+    await said(chips, "and now?", room);
+    const after = hermes.started.at(-1)?.history ?? [];
+    assert.ok(after.some((each) => each.endsWith("make it Lisbon")), "the original remembers its own");
+    assert.ok(!after.some((each) => each.endsWith("make it Porto")), "and not the copy's");
+  });
+
+  it("answers through its original's profile, whose Hermes has the session", async () => {
+    const { chips, client, hermes, state, room, nova } = await withNova({ also: [{ name: "Bea", profile: "bob" }] });
+    const bea = (await client.agents.list()).find((each) => each.name === "Bea")?.agentId ?? "";
+    await client.agents.attach(bea, { spaceId: room, replacing: nova });
+    await said(chips, "plan the trip", room);
+    assert.equal(hermes.started.at(-1)?.profile, "bob");
+    const { second, copy } = await forked(chips, bea);
+    assert.deepEqual(
+      hermes.forks.map((each) => [each.profile, each.made]),
+      [["bob", true]],
+    );
+    await said(chips, "what did we plan?", second);
+    const ran = hermes.started.at(-1);
+    assert.deepEqual([ran?.profile, ran?.sessionId], ["bob", state.sessions[`${copy}|${second}`]]);
+    assert.match(ran?.history[0] ?? "", /plan the trip$/);
+  });
+
+  it("answers what is said to the copy before it is kept in the session it was forked", async () => {
+    // Chips has the copy in the room before the bridge hears back from registering it.
+    const late = (client: Chips): Chips =>
+      new Proxy(client, {
+        get(target, name) {
+          if (name === "agents") {
+            return {
+              ...target.agents,
+              register: async (input: Parameters<Chips["agents"]["register"]>[0]) => {
+                const registered = await target.agents.register(input);
+                if (input.forkedFrom !== undefined) await new Promise((resolve) => setTimeout(resolve, 200));
+                return registered;
+              },
+            };
+          }
+          const value: unknown = Reflect.get(target, name);
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+    const { chips, hermes, room, nova } = await withNova({ chipsFor: late });
+    await said(chips, "plan the trip", room);
+    const second = await chips.openRoom("Second opinion");
+    const { forkId } = await chips.askForFork(nova, second);
+    await sent(chips, "membership.added", (event) => event.payload["fork_of"] === forkId);
+    await said(chips, "what did we plan?", second);
+    assert.equal(hermes.started.at(-1)?.sessionId, `chips-fork-${forkId}`);
+    assert.equal(hermes.sessions.length, 1, "no blank session made for it first");
+  });
+
+  it("makes one copy of an ask heard twice", async () => {
+    const handlers: ((event: AgentFork) => void)[] = [];
+    const { chips, client, hermes, state, logs, room, nova } = await withNova({ chipsFor: tapped(handlers) });
+    const heard: AgentFork[] = [];
+    client.on("agent.fork", (event) => void heard.push(event));
+    await said(chips, "plan the trip", room);
+    const { second, forkId, copy } = await forked(chips, nova);
+    await until(() => heard.length === 1);
+    assert.equal(handlers.length, 1, "the bridge's own handler");
+    for (const handler of handlers) handler(heard[0] as AgentFork);
+    await until(() => logs.filter((line) => line.startsWith("Nova · fork, a copy of Nova, made")).length === 2);
+    assert.deepEqual(logs.filter((line) => line.includes("not in the room")), []);
+    const copies = (await client.agents.list()).filter((each) => each.forkedFrom === nova);
+    assert.deepEqual(
+      copies.map((each) => each.agentId),
+      [copy],
+    );
+    assert.deepEqual(
+      hermes.forks.map((each) => [each.id, each.made]),
+      [
+        [`chips-fork-${forkId}`, true],
+        [`chips-fork-${forkId}`, false],
+      ],
+      "Hermes refused the id the second time",
+    );
+    assert.equal(state.sessions[`${copy}|${second}`], `chips-fork-${forkId}`);
+  });
+
+  it("copies an agent that never spoke with nothing to remember, in the same folder", async () => {
+    const { chips, hermes, state, logs, nova } = await withNova();
+    const { second, copy } = await forked(chips, nova);
+    assert.deepEqual(hermes.forks, []);
+    assert.ok(logs.includes("Nova never spoke: its copy remembers nothing"), logs.join("\n"));
+    await said(chips, "plan the trip", second);
+    assert.deepEqual(hermes.started.at(-1)?.history, [], "a new session of its own");
+    assert.equal(state.folders?.[copy], state.folders?.[nova]);
+  });
+
+  it("forks a compressed session from where it is now", async () => {
+    const { chips, hermes, state, room, nova } = await withNova();
+    await said(chips, "plan the trip", room);
+    const latest = hermes.compress(state.sessions[`${nova}|${room}`] ?? "");
+    const { second } = await forked(chips, nova);
+    assert.equal(hermes.forks[0]?.from, latest);
+    await said(chips, "what did we plan?", second);
+    assert.match(hermes.started.at(-1)?.history[0] ?? "", /plan the trip$/);
+  });
+
+  it("makes no copy of an agent not the harness's, nor for an ask the room stopped waiting for", async () => {
+    const handlers: ((event: AgentFork) => void)[] = [];
+    const { chips, client, hermes, logs, room, nova } = await withNova({ chipsFor: tapped(handlers) });
+    await said(chips, "plan the trip", room);
+    const second = await chips.openRoom("Second opinion");
+    const owner = chips.workspace.owner.participantId;
+    const ask = (agentId: string, agoMs: number) =>
+      ({
+        v: 1,
+        type: "agent.fork",
+        id: newId("event"),
+        ts: new Date(Date.now() - agoMs).toISOString(),
+        workspace_id: client.workspaceId,
+        space_id: second,
+        actor: { kind: "person", id: owner },
+        agent_id: agentId,
+        by: owner,
+      }) as AgentFork;
+    for (const handler of handlers) {
+      handler(ask(newId("agent"), 0));
+      handler(ask(nova, 61_000));
+    }
+    await until(() => logs.filter((line) => line.startsWith("no copy of")).length === 2);
+    assert.ok(logs.some((line) => line.endsWith("it isn't one of this harness's agents")), logs.join("\n"));
+    assert.ok(logs.some((line) => line === `no copy of ${nova}: asked 61 s ago, and the room waits a minute`), logs.join("\n"));
+    assert.deepEqual(hermes.forks, []);
+    assert.ok(!(await client.agents.list()).some((each) => each.forkedFrom !== null));
+  });
+
+  it("keeps the copy in Hermes when Hermes refuses its title, and when its id is taken", async () => {
+    const hermes = await startFakeHermes();
+    open.push(() => hermes.close());
+    const client = new HermesClient({ url: hermes.url, key: hermes.key });
+    const original = await client.newSession("Chips room one");
+    await client.newSession("Chips room two");
+    // Refused after the copy is made, as Hermes 0.22.0 refuses a title in use.
+    assert.equal(await client.forkSession(original, { id: "copy", title: "Chips room two" }), "copy");
+    assert.equal(await client.forkSession(original, { id: "copy", title: "Chips room three" }), "copy");
+    assert.deepEqual(
+      hermes.forks.map((each) => each.made),
+      [true, false],
+    );
+  });
+
+  it("is called after its original, as Jacobian calls a fork, and asks to make copies", () => {
+    assert.equal(forkName("Nova"), "Nova · fork");
+    assert.equal(forkName("Nova · fork 2"), "Nova · fork");
+    assert.ok(WANTS.includes("forks"), "so Chips offers Fork for its agents");
   });
 });
 

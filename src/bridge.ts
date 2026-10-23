@@ -18,6 +18,10 @@
  * A reply a person says wasn't right ("Not right?", Chips ADR 0200) is a turn of the agent that
  * said it, in the same session: shown its reply and the note, it answers again in its place.
  *
+ * A copy of an agent a person asks for in another room (ADR 0087, Fork) is a fork of its session
+ * in Hermes: the copy remembers everything the agent did, and from then on the two go on apart. It
+ * answers through its original's profile and works in its original's folder.
+ *
  * Hermes can't be told anything outside a run, and keeps no schedule this bridge reads yet, so
  * neither is claimed.
  */
@@ -26,7 +30,16 @@ import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import type { Agent, Chips, Decision, Run, Speaker } from "@chipschat/harness";
 import { promptFor, SENDING_FILES, sendAnswer } from "@chipschat/harness";
-import { type AgentAsked, createIdGenerator, type Feedback, type MessageNew, messageIdOf, type StepKind } from "@chipschat/protocol";
+import {
+  type AgentAsked,
+  type AgentFork,
+  createIdGenerator,
+  FORK_WAIT_MS,
+  type Feedback,
+  type MessageNew,
+  messageIdOf,
+  type StepKind,
+} from "@chipschat/protocol";
 import { HermesClient, HermesError, type ProfileAddress, type RunEvent, TERMINAL } from "./hermes.js";
 
 export interface AgentConfig {
@@ -56,7 +69,19 @@ export interface BridgeState {
   sessions: Record<string, string>;
   /** Chips agent id → the folder it works in, named after it the first time and kept. */
   folders?: Record<string, string>;
+  /**
+   * A copy's Chips id → the key of the profile it answers through: its original's, whose Hermes
+   * has the copy's session (Chips ADR 0087, Fork).
+   */
+  profiles?: Record<string, string>;
 }
+
+/**
+ * What it asks to be allowed when it joins with a code: to speak for its agents (ADR 0087), to
+ * make a new one a person asks for in a room (ADR 0108), and to copy one (ADR 0087, Fork). A link
+ * carries what the person chose instead.
+ */
+export const WANTS: readonly string[] = ["agents", "new_agents", "forks"];
 
 export interface BridgeOptions {
   readonly chips: Chips;
@@ -214,6 +239,8 @@ export class Bridge {
   private readonly names = new Map<string, string>();
   /** The feedback events answered with a turn, the newest `KEPT_FEEDBACK`. */
   private readonly lookedAt = new Set<string>();
+  /** The copies being made, one after another: a message for one waits for it (see `copy`). */
+  private copying: Promise<void> = Promise.resolve();
   private readonly log: (line: string) => void;
   private health: ReturnType<typeof setInterval> | undefined;
 
@@ -236,6 +263,11 @@ export class Bridge {
     chips.on("message.new", (message) => void this.hear(message));
     chips.on("agent.asked", (asked) => {
       this.make(asked).catch((error: unknown) => this.log(`a new agent went wrong: ${messageOf(error)}`));
+    });
+    chips.on("agent.fork", (fork) => {
+      this.copying = this.copying
+        .then(() => this.copy(fork))
+        .catch((error: unknown) => this.log(`a copy went wrong: ${messageOf(error)}`));
     });
     chips.on("feedback", (feedback) => {
       this.notRight(feedback).catch((error: unknown) => this.log(`a note on a reply went wrong: ${messageOf(error)}`));
@@ -306,6 +338,58 @@ export class Bridge {
     this.ours.add(agent.agentId);
     this.names.set(agent.agentId, agent.name);
     this.log(`${agent.name} made${agent.attached === false ? `, not in the room: ${agent.why ?? "too late"}` : ""}`);
+  }
+
+  /**
+   * A person asked for a copy of one of the harness's agents in another room (ADR 0087, Fork): the
+   * agent's session in the room it is in, else the last it had, forked in Hermes, is the copy's
+   * session in the room asked. The copy answers through its original's profile, whose Hermes has
+   * that session, and works in its original's folder. It is registered with `forkedFrom` for the
+   * room, which Chips puts it in while the room waits. The fork and the copy are keyed by the ask,
+   * so an ask heard twice forks once (Hermes refuses the id again) and registers the same copy. An
+   * agent that never spoke is copied with nothing to remember. A turn still going is not in the
+   * copy: Hermes copies what the session holds. Nothing is made for an ask the room has stopped
+   * waiting for (`FORK_WAIT_MS`), nor for an agent that isn't the harness's.
+   */
+  private async copy(fork: AgentFork): Promise<void> {
+    const { chips, state } = this.options;
+    const spaceId = fork.space_id;
+    if (spaceId === undefined) return;
+    const late = Date.now() - Date.parse(fork.ts);
+    if (late > FORK_WAIT_MS) {
+      this.log(`no copy of ${fork.agent_id}: asked ${Math.round(late / 1000)} s ago, and the room waits a minute`);
+      return;
+    }
+    const original = await this.profileOf(fork.agent_id);
+    if (original === undefined) {
+      this.log(`no copy of ${fork.agent_id}: it isn't one of this harness's agents`);
+      return;
+    }
+    const name = await this.nameOf(fork.agent_id, original.config.name);
+    const key = `hermes:fork:${fork.id}`;
+    // Its sessions are kept by its profile's key, or by its Chips id for an agent not configured.
+    const who = fork.agent_id === original.agentId ? original.key : fork.agent_id;
+    const listed = await chips.agents.list().catch(() => []);
+    const room = listed.find((agent) => agent.agentId === fork.agent_id)?.room ?? undefined;
+    const from =
+      (room === undefined ? undefined : state.sessions[`${who}|${room}`]) ??
+      Object.entries(state.sessions).findLast(([id]) => id.startsWith(`${who}|`))?.[1];
+    if (from === undefined) this.log(`${name} never spoke: its copy remembers nothing`);
+    const session =
+      from === undefined
+        ? undefined
+        : await original.client.forkSession(from, { id: `chips-fork-${fork.id}`, title: `Chips room ${spaceId} · ${key}` });
+    const folder = this.folderOf(original, fork.agent_id, name);
+    const copy = await chips.agents.register({ key, name: forkName(name), forkedFrom: fork.agent_id, spaceId });
+    // Kept before anything said to it is answered: a message for it meanwhile waits for this.
+    if (session !== undefined) state.sessions[`${copy.agentId}|${spaceId}`] ??= session;
+    state.profiles = { ...state.profiles, [copy.agentId]: original.key };
+    if (folder !== undefined) state.folders = { ...state.folders, [copy.agentId]: folder };
+    this.options.saveState(state);
+    this.ours.add(copy.agentId);
+    this.names.set(copy.agentId, copy.name);
+    const away = copy.attached === false && !copy.spaces.includes(spaceId);
+    this.log(`${copy.name}, a copy of ${name}, made${away ? `, not in the room: ${copy.why ?? "too late"}` : ""}`);
   }
 
   /** An agent's name, from Chips's list when it isn't known yet. */
@@ -399,13 +483,25 @@ export class Bridge {
   }
 
   /**
-   * Which profile answers for a Chips agent: its own, or the first for the harness itself and for
-   * any other of the harness's — its default agent, one Chips made since — read afresh once when
-   * a name is new.
+   * Which profile answers for a Chips agent, as `profileOf` says. An agent not known yet may be a
+   * copy being made, which is waited for, so that its first message is answered in its session.
    */
   private async runnerOf(taker: string): Promise<Running | undefined> {
+    if (taker !== this.options.chips.harnessId && !this.ours.has(taker)) await this.copying;
+    return this.profileOf(taker);
+  }
+
+  /**
+   * Which profile answers for a Chips agent: its own; a copy's original's; or the first for the
+   * harness itself and for any other of the harness's — its default agent, one Chips made since —
+   * read afresh once when a name is new.
+   */
+  private async profileOf(taker: string): Promise<Running | undefined> {
     const own = this.agents.find((agent) => agent.agentId === taker);
     if (own !== undefined) return own;
+    const copied = this.options.state.profiles?.[taker];
+    const original = this.agents.find((agent) => copied !== undefined && agent.key === copied);
+    if (original !== undefined) return original;
     if (taker !== this.options.chips.harnessId && !this.ours.has(taker)) {
       const listed = await this.options.chips.agents.list().catch(() => []);
       for (const agent of listed) {
@@ -825,6 +921,11 @@ function idOf(event: RunEvent): string | undefined {
 function messageOf(error: unknown): string {
   if (error instanceof HermesError) return `${error.message} (${error.status})`;
   return error instanceof Error ? error.message : String(error);
+}
+
+/** A copy's name, as Jacobian names its forks: `Nova · fork`, which Chips numbers when it is taken. */
+export function forkName(original: string): string {
+  return `${original.trim().replace(/ · fork( \d+)?$/, "")} · fork`;
 }
 
 /** The run's goal: the message's first line, without the @ it opened with — the agent's whole name. */

@@ -82,10 +82,46 @@ export class HermesClient {
 
   /** A session of its own for a room: `POST /api/sessions`, so no other surface owns it. */
   async newSession(title: string): Promise<string> {
-    const made = await this.call("POST", "/api/sessions", { title });
-    const id = made["id"] ?? made["session_id"] ?? (made["session"] as Record<string, unknown> | undefined)?.["id"];
-    if (typeof id !== "string" || id === "") throw new HermesError("Hermes made a session and named none", 502);
+    const id = sessionIdOf(await this.call("POST", "/api/sessions", { title }));
+    if (id === undefined) throw new HermesError("Hermes made a session and named none", 502);
     return id;
+  }
+
+  /**
+   * A copy of a session, which goes on apart from it: `POST /api/sessions/{id}/fork`, as Hermes's
+   * own `/branch` makes one (0.22.0's `_handle_fork_session`, read 22 October 2026). Hermes makes
+   * a session under `id` with the original's messages, and ends the original as `branched`. A run
+   * in the original still goes on there: only a session ended by compression refuses a run's
+   * words, and `/v1/runs` passes over a fork when it looks for where a session goes on now. A
+   * compressed session is copied from its latest id, where its messages are now. An `id` in use
+   * (409) is the copy made already, by the same ask heard before; a title Hermes refuses (400) is
+   * refused after the copy is made, which is there all the same, untitled.
+   */
+  async forkSession(sessionId: string, copy: { readonly id?: string | undefined; readonly title: string }): Promise<string> {
+    const from = await this.latestOf(sessionId);
+    try {
+      const made = await this.call("POST", `/api/sessions/${encodeURIComponent(from)}/fork`, {
+        ...(copy.id === undefined ? {} : { id: copy.id }),
+        title: copy.title,
+      });
+      const id = sessionIdOf(made) ?? copy.id;
+      if (id === undefined) throw new HermesError("Hermes copied a session and named none", 502);
+      return id;
+    } catch (error) {
+      const made = error instanceof HermesError && (error.status === 409 || error.code === "invalid_title");
+      if (made && copy.id !== undefined) return copy.id;
+      throw error;
+    }
+  }
+
+  /**
+   * Where a session's messages are now: a compressed one goes on under a new id, which
+   * `GET /api/sessions/{id}/messages` names. The id as it was when Hermes doesn't say.
+   */
+  private async latestOf(sessionId: string): Promise<string> {
+    const read = await this.call("GET", `/api/sessions/${encodeURIComponent(sessionId)}/messages?limit=1`).catch(() => ({}));
+    const latest = (read as Record<string, unknown>)["session_id"];
+    return typeof latest === "string" && latest !== "" ? latest : sessionId;
   }
 
   /** A run in a session: what it is told, and under a key a retry of the same turn repeats. */
@@ -182,6 +218,12 @@ export class HermesClient {
     const text = await answer.text();
     return text === "" ? {} : (JSON.parse(text) as Record<string, unknown>);
   }
+}
+
+/** The session Hermes answered with: its `id`, or its `session`'s (0.22.0 answers `{session: {id, …}}`). */
+function sessionIdOf(made: Record<string, unknown>): string | undefined {
+  const id = made["id"] ?? made["session_id"] ?? (made["session"] as Record<string, unknown> | undefined)?.["id"];
+  return typeof id === "string" && id !== "" ? id : undefined;
 }
 
 /** One server-sent event's lines: its `data`, read as Hermes's JSON, or nothing for a comment. */

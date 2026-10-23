@@ -21,7 +21,7 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { connect, fileStore, helloOnce, JoinError, join as joinChips, reportStep } from "@chipschat/harness";
-import { Bridge, type BridgeState } from "./bridge.js";
+import { Bridge, type BridgeState, WANTS } from "./bridge.js";
 import { keepIfAsked, stopIfAsked, words } from "./keep.js";
 import { type Config, checkedWords, checkHermes, readConfig, SetupError } from "./setup.js";
 
@@ -64,7 +64,7 @@ const joined = await joinChips({
   url: process.env["CHIPS_URL"],
   name,
   software: "chips-hermes 1.0.0",
-  wants: ["agents", "new_agents"],
+  wants: WANTS,
   onCode: (code) => log(`Allow this harness in Chips: ${code}`),
 }).catch(refused);
 // Joined, `npm run keep` hands over to a copy kept running, which says the hello.
