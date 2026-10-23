@@ -456,14 +456,20 @@ export class Bridge {
     }
   }
 
-  /** What the turn changed in its copy, sent to the room's project before its words are posted. */
-  private async sendProject(turn: Turn, words: string): Promise<void> {
-    if (turn.project === undefined) return;
+  /**
+   * What the turn changed in its copy, sent to the room's project before its words are posted: the
+   * commit it left `main` at, for the reply to carry (Chips ADR 0222), when it sent one.
+   */
+  private async sendProject(turn: Turn, words: string): Promise<string | undefined> {
+    if (turn.project === undefined) return undefined;
     const { copy, name } = turn.project;
     try {
-      this.log(`${name}'s project: ${pushedInWords(await copy.push({ words }))}`);
+      const pushed = await copy.push({ words });
+      this.log(`${name}'s project: ${pushedInWords(pushed)}`);
+      return pushed.state === "sent" ? pushed.commit : undefined;
     } catch (error) {
       this.log(`${name}'s project couldn't be sent: ${messageOf(error)}`);
+      return undefined;
     }
   }
 
@@ -880,7 +886,7 @@ export class Bridge {
     const answer = output !== "" ? output : turn.reply.trim();
     // The files its `MEDIA:` lines name go with its words, from its folder (Chips TT-7). With no
     // folder set none can go, and the post says so rather than show the lines.
-    await this.sendProject(turn, answer);
+    const change = await this.sendProject(turn, answer);
     const { folder } = turn;
     const { chips } = this.options;
     const post = await sendAnswer(answer, {
@@ -889,7 +895,7 @@ export class Bridge {
     });
     const reply = post.text;
     if (reply !== "" || post.uploadIds.length > 0) {
-      await turn.speaker.post({ spaceId: run.spaceId, runId: run.id, text: reply, uploadIds: post.uploadIds });
+      await turn.speaker.post({ spaceId: run.spaceId, runId: run.id, text: reply, uploadIds: post.uploadIds, change });
     }
     const said = post.summary;
     const summary = said === "" ? "Done." : said.length <= 2000 ? said : `${said.slice(0, 1990)}…`;
