@@ -497,6 +497,8 @@ describe("the room's project (Chips ADR 0221)", () => {
       (hermes.started[0]?.input ?? "").includes(`The room's project is a git repository. Your copy is ${copy} (0 files), brought up to date just now.`),
       "told where its copy is",
     );
+    // Only a file outside the project needs sending (Chips AP-9).
+    assert.match(hermes.started[0]?.instructions ?? "", /^A file that isn't in the room's project reaches this room only when you send it/);
     assert.ok(logs.includes("Hermes's project: nothing to send"), logs.join("\n"));
 
     // The turn that wrote this stopped before it could send it: the next one takes it.
@@ -530,6 +532,7 @@ describe("the room's project (Chips ADR 0221)", () => {
     await chips.say("look at my repo");
     await sent(chips, "run.completed");
     assert.doesNotMatch(hermes.started[0]?.input ?? "", /The room's project/);
+    assert.match(hermes.started[0]?.instructions ?? "", /^A file reaches this room only when you send it/);
     assert.equal(existsSync(join(own, "room")), false);
   });
 });

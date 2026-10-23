@@ -29,7 +29,7 @@
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import type { Agent, Chips, Decision, Project, Run, Speaker } from "@chipschat/harness";
-import { promptFor, pushedInWords, SENDING_FILES, sendAnswer } from "@chipschat/harness";
+import { promptFor, pushedInWords, sendAnswer, sendingFiles } from "@chipschat/harness";
 import {
   type AgentAsked,
   type AgentFork,
@@ -116,17 +116,27 @@ export interface BridgeOptions {
  * files", and a path (the Chips runs of 17 October 2026). Said here, it holds in a session that
  * began before, and needs nothing changed in Hermes.
  */
-export const FILES_HERE =
-  `${SENDING_FILES} Hermes's note that this API server sends only pictures, and shows a MEDIA: tag on ` +
-  "the runs endpoint as text, does not hold for these runs: they come from Chips, whose bridge takes " +
-  "each MEDIA: line out of your answer and attaches that file to your message, whatever its type, up " +
-  "to 100 MB.";
+export function filesHere(project = false): string {
+  return (
+    `${sendingFiles({ project })} Hermes's note that this API server sends only pictures, and shows a MEDIA: tag on ` +
+    "the runs endpoint as text, does not hold for these runs: they come from Chips, whose bridge takes " +
+    "each MEDIA: line out of your answer and attaches that file to your message, whatever its type, up " +
+    "to 100 MB."
+  );
+}
 
-/** Each run's instructions: how a file reaches the room, and where the agent's own folder is. */
-export function instructionsFor(folder: string | undefined): string {
+/** How a file reaches a room that has no project to work on. */
+export const FILES_HERE = filesHere();
+
+/**
+ * Each run's instructions: how a file reaches the room (with the room's project, a file that isn't
+ * in it: Chips AP-9), and where the agent's own folder is.
+ */
+export function instructionsFor(folder: string | undefined, project = false): string {
+  const files = filesHere(project);
   return folder === undefined
-    ? FILES_HERE
-    : `${FILES_HERE} Your own folder is ${folder}: make and keep your files there, and run your commands from there.`;
+    ? files
+    : `${files} Your own folder is ${folder}: make and keep your files there, and run your commands from there.`;
 }
 
 /** A folder under `root` named after an agent, `-2` and on when another agent has that one. */
@@ -653,7 +663,7 @@ export class Bridge {
   private async once(turn: Turn, session: string, text: string, key: string): Promise<RunEvent | undefined> {
     const { agent } = turn;
     try {
-      turn.hermesRun = await agent.client.startRun({ text, sessionId: session, model: agent.config.model, key, instructions: instructionsFor(turn.folder) });
+      turn.hermesRun = await agent.client.startRun({ text, sessionId: session, model: agent.config.model, key, instructions: instructionsFor(turn.folder, turn.project !== undefined) });
     } catch (error) {
       await this.failed(turn, `${agent.config.name} couldn't start in Hermes: ${messageOf(error)}`, true);
       return undefined;
