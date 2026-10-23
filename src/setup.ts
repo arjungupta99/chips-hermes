@@ -8,7 +8,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
-import { filledIn } from "@chipschat/harness";
+import { filledIn, type StopWords } from "@chipschat/harness";
 import type { AgentConfig } from "./bridge.js";
 import { HermesClient } from "./hermes.js";
 
@@ -19,9 +19,36 @@ export interface Config {
   readonly folders: string;
 }
 
-/** Something to put right before the bridge starts, said so a person can. */
+/**
+ * Something to put right before the bridge starts, said so a person can: the message in a terminal,
+ * `words` on Chips for Mac's sheet (Chips ADR 0218, phase 5).
+ */
 export class SetupError extends Error {
   override readonly name = "SetupError";
+  constructor(
+    message: string,
+    readonly words: StopWords = {},
+  ) {
+    super(message);
+  }
+}
+
+/** A path under the home as a person writes it: `~/.hermes/.env`. */
+const shown = (path: string) => (path.startsWith(`${homedir()}/`) ? `~${path.slice(homedir().length)}` : path);
+
+/** The port in an address, as a person reads it. */
+const portOf = (url: string) => {
+  const parsed = new URL(url);
+  return parsed.port || (parsed.protocol === "https:" ? "443" : "80");
+};
+
+/** What the check found, under its step on the sheet. */
+export function checkedWords(config: Config): string {
+  const urls = new Set(config.agents.map((agent) => agent.address.url));
+  const [url] = urls;
+  return urls.size === 1 && url !== undefined
+    ? `Its API server answers on port ${portOf(url)}`
+    : `Its API server answers for each of ${config.agents.length} agents`;
 }
 
 export const STILL_GOOD = "The link is still good: run the same command again once that's done.";
@@ -78,6 +105,11 @@ export function readConfig(path: string, env: NodeJS.ProcessEnv = process.env): 
     if (!filledIn(key)) {
       throw new SetupError(
         `${agent["name"]}'s key isn't in $${keyEnv} or ${hermesEnvPath(env)}. Turn on Hermes's API server: add API_SERVER_ENABLED=true and API_SERVER_KEY=<a long random key> to ${hermesEnvPath(env)}, and start \`hermes gateway\` again. ${STILL_GOOD}`,
+        {
+          detail: "No key for its API server",
+          says: "Hermes's API server isn't set up.",
+          doing: `Add API_SERVER_ENABLED=true and an API_SERVER_KEY, a long random key, to ${shown(hermesEnvPath(env))}. Then start Hermes with hermes gateway.`,
+        },
       );
     }
     return {
@@ -111,11 +143,22 @@ export async function checkHermes(
     if (!(await client.healthy())) {
       throw new SetupError(
         `Hermes isn't answering for ${agent.name} at ${agent.address.url}: start its API server (API_SERVER_ENABLED=true, then hermes gateway). ${STILL_GOOD}`,
+        {
+          detail: `Nothing answers on port ${portOf(agent.address.url)}`,
+          says: "Hermes's API server is off.",
+          doing: `Add this line to ${shown(hermesEnvPath())}, then start Hermes with hermes gateway.`,
+          copy: "API_SERVER_ENABLED=true",
+        },
       );
     }
     if (!(await client.takesKey())) {
       throw new SetupError(
         `Hermes at ${agent.address.url} refused ${agent.name}'s key, from ${agent.keyFrom ?? `$${agent.keyEnv ?? "API_SERVER_KEY"}`}: it has to be the API_SERVER_KEY Hermes's API server was started with. Start \`hermes gateway\` again after changing it. ${STILL_GOOD}`,
+        {
+          detail: "Its API server refused the key",
+          says: `Hermes refused ${agent.name}'s key.`,
+          doing: "The key has to be the API_SERVER_KEY its API server was started with. Start hermes gateway again after changing it.",
+        },
       );
     }
   }

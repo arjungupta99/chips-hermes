@@ -20,10 +20,10 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { connect, fileStore, helloOnce, JoinError, join as joinChips } from "@chipschat/harness";
+import { connect, fileStore, helloOnce, JoinError, join as joinChips, reportStep } from "@chipschat/harness";
 import { Bridge, type BridgeState } from "./bridge.js";
 import { keepIfAsked, stopIfAsked, words } from "./keep.js";
-import { type Config, checkHermes, readConfig, SetupError } from "./setup.js";
+import { type Config, checkedWords, checkHermes, readConfig, SetupError } from "./setup.js";
 
 const home = (path: string) => (path.startsWith("~/") ? join(homedir(), path.slice(2)) : path);
 const link = process.env["CHIPS_JOIN_LINK"] || undefined;
@@ -36,9 +36,15 @@ const configPath = resolve(home(words[0] ?? "~/.chips-hermes/config.json"));
 let config: Config;
 try {
   config = readConfig(configPath);
-  if (link !== undefined) await checkHermes(config);
+  if (link !== undefined) {
+    reportStep("checking", { detail: "Looking for its API server" });
+    await checkHermes(config);
+    reportStep("checked", { detail: checkedWords(config) });
+  }
 } catch (error) {
   if (!(error instanceof SetupError)) throw error;
+  // Where it stopped, in a few words for Chips for Mac's sheet; the whole sentence for a terminal.
+  reportStep("failed", error.words);
   process.stderr.write(`${error.message}\n`);
   process.exit(1);
 }

@@ -9,7 +9,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
-import { checkHermes, readConfig, SetupError, STILL_GOOD } from "../src/setup.ts";
+import { checkedWords, checkHermes, readConfig, SetupError, STILL_GOOD } from "../src/setup.ts";
 
 const folder = mkdtempSync(join(tmpdir(), "chips-hermes-setup-"));
 const config = join(folder, "config.json");
@@ -69,5 +69,26 @@ describe("before the link is taken up", () => {
       checkHermes(read, () => ({ healthy: async () => true, takesKey: async () => false })),
       stopsWith(/Hermes at http:\/\/127\.0\.0\.1:8642 refused Hermes's key, from \$API_SERVER_KEY: it has to be/),
     );
+  });
+
+  // Chips for Mac's sheet (Chips ADR 0218, phase 5): a few words under the step, the sentence,
+  // what to do, and a line to copy; the terminal keeps the whole sentence.
+  it("says where it stopped in a few words for Chips for Mac's sheet, and what it found", async () => {
+    const read = readConfig(config, { API_SERVER_KEY: "hk-live" });
+    const stopped = await checkHermes(read, () => ({ healthy: async () => false, takesKey: async () => true })).then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    assert.ok(stopped instanceof SetupError);
+    assert.deepEqual(
+      { ...stopped.words, doing: stopped.words.doing?.replace(/ to \S+\.env,/, " to .env,") },
+      {
+        detail: "Nothing answers on port 8642",
+        says: "Hermes's API server is off.",
+        doing: "Add this line to .env, then start Hermes with hermes gateway.",
+        copy: "API_SERVER_ENABLED=true",
+      },
+    );
+    assert.equal(checkedWords(read), "Its API server answers on port 8642");
   });
 });
