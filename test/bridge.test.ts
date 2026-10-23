@@ -508,6 +508,21 @@ describe("the room's project (Chips ADR 0221)", () => {
     assert.match(hermes.started[1]?.input ?? "", /In Markdown, put each sentence on a line of its own\./);
   });
 
+  // The live check on 23 October logged "Hermes's project" for Quill's push, signed by Quill.
+  it("names in its log the agent whose copy it is, as its commits are signed", async () => {
+    const root = mkdtempSync(join(tmpdir(), "chips-hermes-project-"));
+    open.push(async () => rmSync(root, { recursive: true, force: true }));
+    const chips = await startFakeChips({ capabilities: ["agents", "new_agents"] });
+    open.push(() => chips.close());
+    const { logs } = await rig({ chips, folders: root, projects: true });
+    const room = await chips.openRoom("Plans");
+    const { askId } = await chips.askForAgent(room, "Nova");
+    await sent(chips, "membership.added", (event) => event.payload["made_for"] === askId);
+    await chips.say("start the notes", room);
+    await sent(chips, "run.completed");
+    assert.ok(logs.includes("Nova's project: nothing to send"), logs.join("\n"));
+  });
+
   it("leaves an agent a person pointed at a folder of their own working there, with no project", async () => {
     const own = mkdtempSync(join(tmpdir(), "chips-hermes-own-"));
     open.push(async () => rmSync(own, { recursive: true, force: true }));

@@ -235,8 +235,8 @@ interface Turn {
   interrupted: boolean;
   /** The folder the agent works in and its files are sent from, said in each run's instructions. */
   folder?: string | undefined;
-  /** The agent's copy of the room's project, brought up to date as the turn began (Chips ADR 0221). */
-  project?: Project | undefined;
+  /** The agent's copy of the room's project, brought up to date as the turn began, and its name (Chips ADR 0221). */
+  project?: { readonly copy: Project; readonly name: string } | undefined;
 }
 
 export class Bridge {
@@ -448,7 +448,7 @@ export class Bridge {
     try {
       const project = this.options.chips.project({ spaceId, agentId, name, folder, log: (line) => this.log(line) });
       const facts = await project.pull();
-      turn.project = project;
+      turn.project = { copy: project, name };
       return facts;
     } catch (error) {
       this.log(`${name}'s copy of the room's project couldn't be readied: ${messageOf(error)}`);
@@ -459,10 +459,11 @@ export class Bridge {
   /** What the turn changed in its copy, sent to the room's project before its words are posted. */
   private async sendProject(turn: Turn, words: string): Promise<void> {
     if (turn.project === undefined) return;
+    const { copy, name } = turn.project;
     try {
-      this.log(`${turn.agent.config.name}'s project: ${pushedInWords(await turn.project.push({ words }))}`);
+      this.log(`${name}'s project: ${pushedInWords(await copy.push({ words }))}`);
     } catch (error) {
-      this.log(`${turn.agent.config.name}'s project couldn't be sent: ${messageOf(error)}`);
+      this.log(`${name}'s project couldn't be sent: ${messageOf(error)}`);
     }
   }
 
