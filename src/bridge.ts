@@ -28,8 +28,8 @@
 
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
-import type { Agent, Chips, Decision, Run, Speaker } from "@chipschat/harness";
-import { promptFor, SENDING_FILES, sendAnswer } from "@chipschat/harness";
+import type { Agent, Chips, Decision, Project, Run, Speaker } from "@chipschat/harness";
+import { promptFor, pushedInWords, SENDING_FILES, sendAnswer } from "@chipschat/harness";
 import {
   type AgentAsked,
   type AgentFork,
@@ -38,6 +38,7 @@ import {
   type Feedback,
   type MessageNew,
   messageIdOf,
+  type ProjectFacts,
   type StepKind,
 } from "@chipschat/protocol";
 import { HermesClient, HermesError, type ProfileAddress, type RunEvent, TERMINAL } from "./hermes.js";
@@ -93,6 +94,12 @@ export interface BridgeOptions {
    * None, and an agent has no folder: no file it names is sent.
    */
   readonly folders?: string | undefined;
+  /**
+   * Whether each agent works on its room's project in a copy in its folder (Chips ADR 0221): true
+   * when this machine has a git new enough. An agent a person pointed at a folder of their own works
+   * there as it always has.
+   */
+  readonly projects?: boolean | undefined;
   readonly state: BridgeState;
   readonly saveState: (state: BridgeState) => void;
   /** How to reach a profile: its gateway, unless a test hands in a client of its own. */
@@ -228,6 +235,8 @@ interface Turn {
   interrupted: boolean;
   /** The folder the agent works in and its files are sent from, said in each run's instructions. */
   folder?: string | undefined;
+  /** The agent's copy of the room's project, brought up to date as the turn began (Chips ADR 0221). */
+  project?: Project | undefined;
 }
 
 export class Bridge {
@@ -422,6 +431,41 @@ export class Bridge {
     return folder;
   }
 
+  /**
+   * The room's project for a turn (Chips ADR 0221): the agent's copy, in its folder, brought up to
+   * date, and what the turn is told of it. None for an agent a person pointed at a folder of their
+   * own, nor where this machine has no git for it.
+   */
+  private async projectFor(
+    turn: Turn,
+    spaceId: string,
+    agentId: string,
+    name: string,
+  ): Promise<ProjectFacts | undefined> {
+    if (this.options.projects !== true || turn.agent.config.folder !== undefined) return undefined;
+    const folder = turn.folder;
+    if (folder === undefined) return undefined;
+    try {
+      const project = this.options.chips.project({ spaceId, agentId, name, folder, log: (line) => this.log(line) });
+      const facts = await project.pull();
+      turn.project = project;
+      return facts;
+    } catch (error) {
+      this.log(`${name}'s copy of the room's project couldn't be readied: ${messageOf(error)}`);
+      return undefined;
+    }
+  }
+
+  /** What the turn changed in its copy, sent to the room's project before its words are posted. */
+  private async sendProject(turn: Turn, words: string): Promise<void> {
+    if (turn.project === undefined) return;
+    try {
+      this.log(`${turn.agent.config.name}'s project: ${pushedInWords(await turn.project.push({ words }))}`);
+    } catch (error) {
+      this.log(`${turn.agent.config.name}'s project couldn't be sent: ${messageOf(error)}`);
+    }
+  }
+
   /** Trouble while a profile's gateway doesn't answer, and fine once all do (ADR 0083). */
   private async sayHowItIs(): Promise<void> {
     for (const agent of this.agents) agent.up = await agent.client.healthy();
@@ -579,7 +623,8 @@ export class Bridge {
     }
     const name = speakerId === undefined ? agent.config.name : await this.nameOf(speakerId, agent.config.name);
     turn.folder = this.folderOf(agent, speakerId ?? agent.agentId, name);
-    let text: string | undefined = promptFor(message, { taker: speakerId, sayWho });
+    const project = await this.projectFor(turn, room.spaceId, speakerId ?? agent.agentId, name);
+    let text: string | undefined = promptFor(message, { taker: speakerId, sayWho, project });
     for (let round = 0; text !== undefined && !turn.cancelled && !run.over; round += 1) {
       const last = await this.once(turn, session, text, `${run.id}:${round}`);
       if (last === undefined) return;
@@ -834,6 +879,7 @@ export class Bridge {
     const answer = output !== "" ? output : turn.reply.trim();
     // The files its `MEDIA:` lines name go with its words, from its folder (Chips TT-7). With no
     // folder set none can go, and the post says so rather than show the lines.
+    await this.sendProject(turn, answer);
     const { folder } = turn;
     const { chips } = this.options;
     const post = await sendAnswer(answer, {

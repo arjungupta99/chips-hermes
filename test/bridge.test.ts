@@ -4,7 +4,7 @@
  */
 
 import { strict as assert } from "node:assert";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, it } from "node:test";
@@ -52,6 +52,8 @@ async function rig(
     model?: string;
     folder?: string;
     folders?: string;
+    /** Agents work on their room's project (Chips ADR 0221). */
+    projects?: boolean;
     /** More profiles, after the first. */
     also?: readonly { name: string; profile: string }[];
     /** What the bridge is handed in the client's place: a test's tap on it. */
@@ -79,6 +81,7 @@ async function rig(
     ],
     home: chips.address.spaceId,
     ...(options.folders === undefined ? {} : { folders: options.folders }),
+    ...(options.projects === undefined ? {} : { projects: options.projects }),
     state,
     saveState: () => undefined,
     healthEveryMs: 50,
@@ -479,6 +482,40 @@ describe("the files an answer names", () => {
     const why = "was not attached: this agent has no folder its files are sent from.)";
     assert.equal(words.payload["text"], `The page is ready.\n\n(page.html ${why}\n\n(secret.txt ${why}`);
     assert.match(hermes.started[0]?.instructions ?? "", /MEDIA:<path>/, "told how all the same");
+  });
+});
+
+describe("the room's project (Chips ADR 0221)", () => {
+  it("hands the agent its copy in its folder, and sends what it left there with its next turn", async () => {
+    const root = mkdtempSync(join(tmpdir(), "chips-hermes-project-"));
+    open.push(async () => rmSync(root, { recursive: true, force: true }));
+    const { chips, hermes, agentId, logs } = await rig({ folders: root, projects: true });
+    await chips.say("start the notes");
+    await sent(chips, "run.completed");
+    const copy = join(root, "hermes", "room");
+    assert.ok(
+      (hermes.started[0]?.input ?? "").includes(`The room's project is a git repository. Your copy is ${copy} (0 files), brought up to date just now.`),
+      "told where its copy is",
+    );
+    assert.ok(logs.includes("Hermes's project: nothing to send"), logs.join("\n"));
+
+    // The turn that wrote this stopped before it could send it: the next one takes it.
+    writeFileSync(join(copy, "notes.md"), "One sentence.\n");
+    await chips.say("go on");
+    const changed = await sent(chips, "project.changed");
+    assert.equal(changed.payload["by"], agentId);
+    assert.deepEqual(changed.payload["files"], [{ path: "notes.md", added: 1, removed: 0 }]);
+    assert.match(hermes.started[1]?.input ?? "", /In Markdown, put each sentence on a line of its own\./);
+  });
+
+  it("leaves an agent a person pointed at a folder of their own working there, with no project", async () => {
+    const own = mkdtempSync(join(tmpdir(), "chips-hermes-own-"));
+    open.push(async () => rmSync(own, { recursive: true, force: true }));
+    const { chips, hermes } = await rig({ folder: own, projects: true });
+    await chips.say("look at my repo");
+    await sent(chips, "run.completed");
+    assert.doesNotMatch(hermes.started[0]?.input ?? "", /The room's project/);
+    assert.equal(existsSync(join(own, "room")), false);
   });
 });
 
