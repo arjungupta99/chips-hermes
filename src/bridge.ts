@@ -29,7 +29,7 @@
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import type { Agent, Chips, Decision, Project, Run, Speaker } from "@chipschat/harness";
-import { promptFor, pushedInWords, sendAnswer, sendingFiles } from "@chipschat/harness";
+import { heldNote, promptFor, pushedInWords, sendAnswer, sendingFiles } from "@chipschat/harness";
 import {
   type AgentAsked,
   type AgentFork,
@@ -468,18 +468,22 @@ export class Bridge {
 
   /**
    * What the turn changed in its copy, sent to the room's project before its words are posted: the
-   * commit it left `main` at, for the reply to carry (Chips ADR 0222), when it sent one.
+   * commit it left `main` at, for the reply to carry (Chips ADR 0222), when it sent one; else, when
+   * the change didn't go, the line the reply says so in (Chips AP-6).
    */
-  private async sendProject(turn: Turn, words: string): Promise<string | undefined> {
-    if (turn.project === undefined) return undefined;
+  private async sendProject(turn: Turn, words: string): Promise<{ change?: string; note?: string }> {
+    if (turn.project === undefined) return {};
     const { copy, name } = turn.project;
     try {
       const pushed = await copy.push({ words });
       this.log(`${name}'s project: ${pushedInWords(pushed)}`);
-      return pushed.state === "sent" ? pushed.commit : undefined;
+      if (pushed.state === "sent") return { change: pushed.commit };
+      const note = heldNote(pushed, name);
+      return note === undefined ? {} : { note };
     } catch (error) {
       this.log(`${name}'s project couldn't be sent: ${messageOf(error)}`);
-      return undefined;
+      const note = heldNote({ state: "failed", why: messageOf(error) }, name);
+      return note === undefined ? {} : { note };
     }
   }
 
@@ -896,10 +900,11 @@ export class Bridge {
     const answer = output !== "" ? output : turn.reply.trim();
     // The files its `MEDIA:` lines name go with its words, from its folder (Chips TT-7). With no
     // folder set none can go, and the post says so rather than show the lines.
-    const change = await this.sendProject(turn, answer);
+    const { change, note } = await this.sendProject(turn, answer);
     const { folder } = turn;
     const { chips } = this.options;
-    const post = await sendAnswer(answer, {
+    const words = [answer, note ?? ""].filter((part) => part !== "").join("\n\n");
+    const post = await sendAnswer(words, {
       folders: folder === undefined ? [] : [folder],
       upload: (input) => chips.upload(input),
     });
