@@ -1,6 +1,6 @@
 {
   "name": "@chipschat/hermes",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Hermes Agent as a Chips harness, on its Runs API: each profile a Chips agent, each room a Hermes session.",
   "license": "Apache-2.0",
   "type": "module",
