@@ -397,7 +397,7 @@ export class Bridge {
     const session =
       from === undefined
         ? undefined
-        : await original.client.forkSession(from, { id: `chips-fork-${fork.id}`, title: `Chips room ${spaceId} · ${key}` });
+        : await original.client.forkSession(from, { id: `chips-fork-${fork.id}`, title: `Chips space ${spaceId} · ${key}` });
     const folder = this.folderOf(original, fork.agent_id, name);
     const copy = await chips.agents.register({ key, name: forkName(name), forkedFrom: fork.agent_id, spaceId });
     // Kept before anything said to it is answered: a message for it meanwhile waits for this.
@@ -703,7 +703,7 @@ export class Bridge {
     if (kept !== undefined) return kept;
     // Hermes keeps a title to one session, so each other agent's session in a room is named for it.
     const who = id.slice(0, id.lastIndexOf("|"));
-    const made = await agent.client.newSession(`Chips room ${spaceId}${who === agent.key ? "" : ` · ${who}`}`);
+    const made = await agent.client.newSession(`Chips space ${spaceId}${who === agent.key ? "" : ` · ${who}`}`);
     this.options.state.sessions[id] = made;
     this.options.saveState(this.options.state);
     return made;
@@ -1016,7 +1016,7 @@ const GOAL_SHOWN = 120;
 export function lookAgain(who: string, reply: string | undefined, note: string | undefined): string {
   const said = reply?.trim() ?? "";
   return [
-    `${who} says your reply in this room wasn't right.`,
+    `${who} says your reply in this space wasn't right.`,
     ...(said === "" ? [] : [`Your reply:\n«${cut(said, REPLY_SHOWN)}»`]),
     note === undefined || note === ""
       ? "They didn't say what. Read your reply again and find what was wrong."

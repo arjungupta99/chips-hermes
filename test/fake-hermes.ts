@@ -146,7 +146,7 @@ export async function startFakeHermes(
   const play = async (run: FakeRun) => {
     await sleep(20);
     // Before the words are read: the fix turn's last line asks the agent to "ask them" when unsure.
-    if (run.input.includes("says your reply in this room wasn't right.")) {
+    if (run.input.includes("says your reply in this space wasn't right.")) {
       const output = "Sunday it is: I moved the plan to Sunday, your flight home.";
       return finish(run, "completed", { completed: true, output, usage, runtime: { model: "heron-2" } });
     }

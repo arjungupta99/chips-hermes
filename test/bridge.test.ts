@@ -240,7 +240,7 @@ describe("a copy a person asks for (Chips ADR 0087, Fork)", () => {
       hermes.forks.map((each) => [each.from, each.id, each.made]),
       [[kept, id, true]],
     );
-    assert.equal(hermes.forks[0]?.title, `Chips room ${second} · hermes:fork:${forkId}`, "a title no other session has");
+    assert.equal(hermes.forks[0]?.title, `Chips space ${second} · hermes:fork:${forkId}`, "a title no other session has");
     assert.equal(hermes.ended.get(kept), "branched", "as Hermes's fork leaves it");
     assert.equal(state.sessions[`${copy}|${second}`], id);
     assert.equal(state.profiles?.[copy], keyOf({ name: AGENT.name, address: { url: hermes.url, key: hermes.key, profile: "default" } }));
@@ -398,11 +398,11 @@ describe("a copy a person asks for (Chips ADR 0087, Fork)", () => {
     const hermes = await startFakeHermes();
     open.push(() => hermes.close());
     const client = new HermesClient({ url: hermes.url, key: hermes.key });
-    const original = await client.newSession("Chips room one");
-    await client.newSession("Chips room two");
+    const original = await client.newSession("Chips space one");
+    await client.newSession("Chips space two");
     // Refused after the copy is made, as Hermes 0.22.0 refuses a title in use.
-    assert.equal(await client.forkSession(original, { id: "copy", title: "Chips room two" }), "copy");
-    assert.equal(await client.forkSession(original, { id: "copy", title: "Chips room three" }), "copy");
+    assert.equal(await client.forkSession(original, { id: "copy", title: "Chips space two" }), "copy");
+    assert.equal(await client.forkSession(original, { id: "copy", title: "Chips space three" }), "copy");
     assert.deepEqual(
       hermes.forks.map((each) => each.made),
       [true, false],
@@ -494,11 +494,11 @@ describe("the room's project (Chips ADR 0221)", () => {
     await sent(chips, "run.completed");
     const copy = join(root, "hermes", "room");
     assert.ok(
-      (hermes.started[0]?.input ?? "").includes(`The room's project is a git repository. Your copy is ${copy} (0 files), brought up to date just now.`),
+      (hermes.started[0]?.input ?? "").includes(`The space's project is a git repository. Your copy is ${copy} (0 files), brought up to date just now.`),
       "told where its copy is",
     );
     // Only a file outside the project needs sending (Chips AP-9).
-    assert.match(hermes.started[0]?.instructions ?? "", /^A file that isn't in the room's project reaches this room only when you send it/);
+    assert.match(hermes.started[0]?.instructions ?? "", /^A file that isn't in the space's project reaches this space only when you send it/);
     assert.ok(logs.includes("Hermes's project: nothing to send"), logs.join("\n"));
 
     // The turn that wrote this stopped before it could send it: the next one takes it.
@@ -538,7 +538,7 @@ describe("the room's project (Chips ADR 0221)", () => {
     const posted = await sent(chips, "message.post", (event) => String(event.payload["text"] ?? "").includes("(Not in"));
     assert.match(
       String(posted.payload["text"]),
-      /\n\n\(Not in the room's project: config\.js looks like it holds an Anthropic key, so nothing was sent\.\)$/,
+      /\n\n\(Not in the space's project: config\.js looks like it holds an Anthropic key, so nothing was sent\.\)$/,
     );
     assert.equal(posted.payload["change"], undefined);
   });
@@ -549,8 +549,8 @@ describe("the room's project (Chips ADR 0221)", () => {
     const { chips, hermes } = await rig({ folder: own, projects: true });
     await chips.say("look at my repo");
     await sent(chips, "run.completed");
-    assert.doesNotMatch(hermes.started[0]?.input ?? "", /The room's project/);
-    assert.match(hermes.started[0]?.instructions ?? "", /^A file reaches this room only when you send it/);
+    assert.doesNotMatch(hermes.started[0]?.input ?? "", /The space's project/);
+    assert.match(hermes.started[0]?.instructions ?? "", /^A file reaches this space only when you send it/);
     assert.equal(existsSync(join(own, "room")), false);
   });
 });
@@ -714,7 +714,7 @@ describe("a reply a person says wasn't right (Chips ADR 0200)", () => {
     const who = chips.workspace.owner.displayName;
     // Any other turn's words say who with their standing in the workspace (Chips SEC-15).
     const named = `${who} (owner): `;
-    assert.ok(told.startsWith(`${who} says your reply in this room wasn't right.\n\nYour reply:\n«Here is the answer.»`), told);
+    assert.ok(told.startsWith(`${who} says your reply in this space wasn't right.\n\nYour reply:\n«Here is the answer.»`), told);
     assert.ok(!told.includes(named), told);
     assert.ok((hermes.started[0]?.input ?? "").endsWith(`${named}summarise the notes`), "as any other turn's do");
     assert.ok(told.includes(`What wasn't right: «${NOTE}»`), told);
