@@ -569,7 +569,8 @@ describe("a turn", () => {
       .split("\n")
       .map((line) => (line === "" ? ">" : `> ${line}`))
       .join("\n");
-    assert.match(prompt, /Arjun is replying to your message from today at \d{1,2}:\d{2} [AP]M\.\nYour message:\n/);
+    // Who replies says their standing, as every line of the turn does (Chips SEC-49).
+    assert.match(prompt, /Arjun \(owner\) is replying to your message from today at \d{1,2}:\d{2} [AP]M\.\nYour message:\n/);
     assert.ok(prompt.includes(`Your message:\n${quote}\n\n`), prompt);
     assert.match(prompt, /Shorter, please$/);
   });
