@@ -53,6 +53,7 @@ export interface Started {
   readonly input: string;
   readonly sessionId: string | undefined;
   readonly model: string | undefined;
+  readonly provider: string | undefined;
   /** What the run said to add to the turn's system prompt. */
   readonly instructions: string | undefined;
   readonly profile: string;
@@ -95,6 +96,13 @@ export interface FakeHermes {
   /** The deliveries the webhook made, and how each was answered. */
   readonly delivered: { readonly status: number; readonly body: Record<string, unknown> }[];
   /**
+   * What `/api/model/options` answers for each profile, as Hermes's picker lists them: the
+   * profile's model and provider, and the providers it is set up for.
+   */
+  options: (profile: string) => Record<string, unknown>;
+  /** The profiles whose models were asked for. */
+  readonly optionsAsked: string[];
+  /**
    * Hermes's root, once a test has one: a request under `/p/<profile>` for a profile with an
    * `API_SERVER_KEY` in its `.env` there takes that key and no other, as a multiplexing gateway does.
    */
@@ -133,6 +141,16 @@ export async function startFakeHermes(
     up: true,
     window: 200_000,
     delivered: [],
+    optionsAsked: [],
+    options: () => ({
+      model: "heron-2",
+      provider: "fake",
+      providers: [
+        { slug: "fake", name: "Fake", is_current: true, authenticated: true, models: ["heron-2", "heron-mini"] },
+        { slug: "kite", name: "Kite", is_current: false, authenticated: true, models: ["kite-1"] },
+        { slug: "gone", name: "Gone", is_current: false, authenticated: false, models: ["gone-1"] },
+      ],
+    }),
     compress: (sessionId) => {
       const from = latestOf(sessionId);
       const next = `${from}~`;
@@ -341,6 +359,10 @@ export async function startFakeHermes(
       if (request.headers.authorization !== `Bearer ${own ?? key}`) return json(response, 401, { error: { message: "no key" } });
       const path = profiled?.[2] ?? url.pathname;
       const method = request.method ?? "GET";
+      if (method === "GET" && path === "/api/model/options") {
+        fake.optionsAsked.push(profile);
+        return json(response, 200, fake.options(profile));
+      }
       if (method === "GET" && path === "/v1/models") {
         return json(response, 200, { object: "list", data: [{ id: "hermes-agent", object: "model", owned_by: "hermes" }] });
       }
@@ -402,6 +424,7 @@ export async function startFakeHermes(
           input: run.input,
           sessionId: typeof body["session_id"] === "string" ? body["session_id"] : undefined,
           model: typeof body["model"] === "string" ? body["model"] : undefined,
+          provider: typeof body["provider"] === "string" ? body["provider"] : undefined,
           instructions: typeof body["instructions"] === "string" ? body["instructions"] : undefined,
           profile,
           idempotencyKey: request.headers["idempotency-key"] as string | undefined,

@@ -31,7 +31,8 @@
  * An agent's page in Chips shows its context (Chips ADR 0134): the files Hermes builds it from,
  * which a person may edit there (`context.ts`). It shows its context window too (Chips ADR 0146):
  * how full its session is, as Hermes says after each model call through the webhook the bridge
- * adds to its config (`fills.ts`, `hooks.ts`).
+ * adds to its config (`fills.ts`, `hooks.ts`). And its model (Chips ADR 0141): one of those
+ * Hermes has for its profile, which each of its runs asks for (`models.ts`).
  *
  * Hermes can't be told anything outside a run, and keeps no schedule this bridge reads yet, so
  * neither is claimed.
@@ -43,6 +44,7 @@ import type {
   Agent,
   AgentContextCopy,
   AgentContextWindowCopy,
+  AgentModelCopy,
   Chips,
   Decision,
   HarnessContextCopy,
@@ -62,6 +64,7 @@ import {
   type Feedback,
   type MessageNew,
   messageIdOf,
+  type ModelChangeFrame,
   type ProjectFacts,
   type StepKind,
   type WindowChangeFrame,
@@ -72,6 +75,7 @@ import { Fills, type KeptFills, WHY_NOT, whyReadOnly } from "./fills.js";
 import { HermesClient, HermesError, type ProfileAddress, type RunEvent, TERMINAL } from "./hermes.js";
 import { envValue, profileHome, profileName } from "./home.js";
 import { hookUrl, SECRET_ENV } from "./hooks.js";
+import { copyOf, type ModelOptions, type RunModel, runModelOf } from "./models.js";
 import { freeProfile, KEY_ENV, type ProfileMaker, readyProfile } from "./profiles.js";
 
 export interface AgentConfig {
@@ -114,14 +118,19 @@ export interface BridgeState {
   made?: Record<string, string>;
   /** Each agent's last context window reading, and the port and secret Hermes's webhook uses. */
   fills?: KeptFills;
+  /**
+   * Chips agent id → the model a person picked for it (Chips ADR 0141), a choice's id, which each
+   * of its runs asks for; `null` for Hermes's default, the profile's own.
+   */
+  models?: Record<string, string | null>;
 }
 
 /**
  * What it asks to be allowed when it joins with a code: to speak for its agents (ADR 0087), to
  * take a space a person asks for from the + (ADR 0241), to make a new agent a person asks for in a
- * room (ADR 0108), to copy one (ADR 0087, Fork), and to show each agent's context (ADR 0134) and
- * context window (ADR 0146), and to restart Hermes's gateway when a person asks (ADR 0094,
- * `gateway.ts`). A link carries what the person chose instead.
+ * room (ADR 0108), to copy one (ADR 0087, Fork), to show each agent's context (ADR 0134), model
+ * (ADR 0141) and context window (ADR 0146), and to restart Hermes's gateway when a person asks
+ * (ADR 0094, `gateway.ts`). A link carries what the person chose instead.
  */
 export const WANTS: readonly string[] = [
   "agents",
@@ -129,6 +138,7 @@ export const WANTS: readonly string[] = [
   "new_agents",
   "forks",
   "context_files",
+  "models",
   "context_windows",
   "restarts",
 ];
@@ -195,6 +205,7 @@ export function settingsFor(active: () => Bridge | undefined): SettingsHandlers 
   };
   return {
     context: (edit) => bridge().onContextEdit(edit),
+    models: (change) => bridge().onModelChange(change),
     contextWindows: {
       compact: async (ask) => bridge().onWindowCompact(ask),
       change: async (ask) => bridge().onWindowChange(ask),
@@ -321,6 +332,8 @@ interface Turn {
   readonly run: Run;
   readonly speaker: Speaker;
   readonly agent: Running;
+  /** The Chips agent whose turn it is: whose model its runs ask for. */
+  readonly who: string;
   /** Hermes's run, once started: empty until then. */
   hermesRun: string;
   reply: string;
@@ -370,6 +383,8 @@ export class Bridge {
   /** The port Hermes's webhook reaches the bridge on, once it listens. */
   private fillsPort: number | undefined;
   private toldNoReadings = false;
+  /** Whether the log has said once that a model copy wasn't sent. */
+  private toldModels = false;
   /** While Hermes's gateway restarts (Chips ADR 0094), the health watch says nothing: the restart says how it went. */
   private held = false;
   /** What went wrong in the last restart, said in place of the watch's own words while Hermes doesn't answer. */
@@ -474,12 +489,14 @@ export class Bridge {
   // ------------------------------------------------------------------ an agent's page
 
   /**
-   * The agents' context and context windows, sent at start and kept current: the files read
-   * again every so often and after each turn, a window copy on each reading Hermes sends.
+   * The agents' models, context and context windows, sent at start and kept current: the models
+   * again when an agent comes or goes, the files read again every so often and after each turn, a
+   * window copy on each reading Hermes sends.
    */
   private async startSettings(): Promise<void> {
-    if (this.contexts === undefined) return;
     this.listed = await this.options.chips.agents.list().catch(() => this.listed);
+    await this.sendModels();
+    if (this.contexts === undefined) return;
     await this.contexts.refresh();
     this.contextTimer = setInterval(() => void this.contexts?.refresh(), this.options.contextEveryMs ?? 15_000);
     this.contextTimer.unref();
@@ -504,9 +521,8 @@ export class Bridge {
     return this.fillsPort === undefined ? undefined : hookUrl(this.fillsPort, profileName(profile));
   }
 
-  /** The harness's agents listed again, the copies of any gone forgotten, and the context sent. */
+  /** The harness's agents listed again, the copies of any gone forgotten, and the context and models sent. */
   private async agentsMoved(): Promise<void> {
-    if (this.contexts === undefined) return;
     const before = this.listed;
     this.listed = await this.options.chips.agents.list().catch(() => this.listed);
     const now = new Set(this.active().map((agent) => agent.agentId));
@@ -515,7 +531,8 @@ export class Bridge {
       this.options.chips.settings.forget(gone.agentId);
       this.fills?.forget(gone.agentId);
     }
-    await this.contexts.refresh();
+    await this.contexts?.refresh();
+    await this.sendModels();
   }
 
   /** The harness's agents that read anything now: the active ones listed. */
@@ -532,10 +549,15 @@ export class Bridge {
 
   /** The profile an agent runs on: its own, a copy's original's, else the first (as `profileOf` picks). */
   private profileFor(agentId: string): Profile | undefined {
+    const running = this.runningFor(agentId);
+    return running === undefined ? undefined : this.profileOfRunning(running);
+  }
+
+  /** What answers for an agent: its own profile, a copy's original's, else the first. */
+  private runningFor(agentId: string): Running | undefined {
     const own = this.agents.find((agent) => agent.agentId === agentId) ?? this.own.get(agentId);
     const copied = this.options.state.profiles?.[agentId];
-    const running = own ?? (copied === undefined ? undefined : this.byKey(copied)) ?? this.agents[0];
-    return running === undefined ? undefined : this.profileOfRunning(running);
+    return own ?? (copied === undefined ? undefined : this.byKey(copied)) ?? this.agents[0];
   }
 
   /** A profile the bridge speaks to, by its key: a configured agent's, or a made agent's Chips id. */
@@ -581,6 +603,83 @@ export class Bridge {
       this.listed = await this.options.chips.agents.list().catch(() => this.listed);
     }
     return this.contexts.edit(frame);
+  }
+
+  // ------------------------------------------------------------------ an agent's model
+
+  /**
+   * The model a person picked for an agent, as its copy names it: a choice's id, or the model its
+   * config says each of its profile's runs asks for; nothing for Hermes's default.
+   */
+  private ownModel(agentId: string, running: Running): string | undefined {
+    const picked = this.options.state.models?.[agentId];
+    return picked === null ? undefined : (picked ?? running.config.model);
+  }
+
+  /** What a turn's runs ask Hermes for: the agent's own model, else nothing, and the profile's runs. */
+  private runModel(turn: Turn): RunModel {
+    const picked = this.options.state.models?.[turn.who];
+    if (picked === null) return {};
+    if (picked !== undefined) return runModelOf(picked);
+    return turn.agent.config.model === undefined ? {} : { model: turn.agent.config.model };
+  }
+
+  /**
+   * Each agent's model, sent to Chips (Chips ADR 0141): the models Hermes has for its profile, read
+   * once a profile, with the one it runs on. One whose Hermes doesn't answer is sent none, and the
+   * log says so once.
+   */
+  private async sendModels(): Promise<void> {
+    const { chips } = this.options;
+    const ids = new Set([...this.active().map((agent) => agent.agentId), ...this.agents.map((agent) => agent.agentId)]);
+    const read = new Map<Running, Promise<ModelOptions>>();
+    for (const agentId of ids) {
+      const running = this.runningFor(agentId);
+      if (running === undefined) continue;
+      try {
+        let options = read.get(running);
+        if (options === undefined) {
+          options = running.client.modelOptions();
+          read.set(running, options);
+        }
+        const copy = copyOf(await options, this.ownModel(agentId, running));
+        if (copy !== undefined) await chips.settings.model(agentId, copy);
+      } catch (error) {
+        if (!this.toldModels) this.log(`models: none sent for ${running.config.name}: ${messageOf(error)}`);
+        this.toldModels = true;
+      }
+    }
+  }
+
+  /**
+   * A person picked an agent's model (Chips ADR 0141): one Hermes has for its profile, kept as the
+   * model each of its runs asks for from now on, or Hermes's default (`null`), the profile's own.
+   * The model it runs on already changes nothing. Hermes says no levels of effort, so none is taken.
+   */
+  async onModelChange(frame: ModelChangeFrame): Promise<AgentModelCopy> {
+    const { state } = this.options;
+    const agentId = frame.agent_id;
+    const ours =
+      this.ours.has(agentId) || this.agents.some((agent) => agent.agentId === agentId) || this.own.has(agentId);
+    const running = ours ? this.runningFor(agentId) : undefined;
+    if (running === undefined) throw new Refuse(`${agentId} isn't one of this harness's agents.`);
+    let options: ModelOptions;
+    try {
+      options = await running.client.modelOptions();
+    } catch (error) {
+      throw new Refuse(`Hermes didn't say which models it has: ${messageOf(error)}`);
+    }
+    const now = copyOf(options, this.ownModel(agentId, running));
+    if (now === undefined) throw new Refuse("Hermes has no model for this agent's profile.");
+    if (frame.model === now.model) return now;
+    if (frame.model !== null && !now.choices.some((choice) => choice.id === frame.model)) {
+      throw new Refuse(`Hermes has no ${frame.model} for this agent's profile.`, now);
+    }
+    state.models = { ...state.models, [agentId]: frame.model };
+    this.options.saveState(state);
+    const name = await this.nameOf(agentId, running.config.name);
+    this.log(`${name} runs on ${frame.model ?? `Hermes's default (${now.default?.model ?? "its profile's"})`}, from Chips`);
+    return copyOf(options, this.ownModel(agentId, running)) ?? now;
   }
 
   /** A person's Compact now (Chips ADR 0146): Hermes can't be asked to compact from outside a run. */
@@ -1019,6 +1118,7 @@ export class Bridge {
       run,
       speaker,
       agent,
+      who: speakerId ?? agent.agentId,
       hermesRun: "",
       reply: "",
       saidAt: 0,
@@ -1071,7 +1171,13 @@ export class Bridge {
   private async once(turn: Turn, session: string, text: string, key: string): Promise<RunEvent | undefined> {
     const { agent } = turn;
     try {
-      turn.hermesRun = await agent.client.startRun({ text, sessionId: session, model: agent.config.model, key, instructions: instructionsFor(turn.folder, turn.project !== undefined) });
+      turn.hermesRun = await agent.client.startRun({
+        text,
+        sessionId: session,
+        ...this.runModel(turn),
+        key,
+        instructions: instructionsFor(turn.folder, turn.project !== undefined),
+      });
     } catch (error) {
       await this.failed(turn, `${agent.config.name} couldn't start in Hermes: ${messageOf(error)}`, true);
       return undefined;
@@ -1367,7 +1473,7 @@ export class Bridge {
     const output = count("output_tokens") ?? 0;
     if (input + output === 0) return;
     const runtime = (last["runtime"] ?? {}) as Record<string, unknown>;
-    const model = typeof runtime["model"] === "string" ? runtime["model"] : (turn.agent.config.model ?? "hermes");
+    const model = typeof runtime["model"] === "string" ? runtime["model"] : (this.runModel(turn).model ?? "hermes");
     await turn.run
       .usage({
         scope: "step",

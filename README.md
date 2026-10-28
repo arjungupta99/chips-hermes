@@ -35,12 +35,13 @@ Apache-2.0. Not published: a local repository until Chips's SDK is.
 | Trouble on the harness | `GET /health` every 30 s, per profile |
 | Restart on its page (ADR 0094) | Hermes's gateway restarted on this machine, and Hermes shown as restarting until its API server answers again (below) |
 | Context (ADRs 0134, 0238) | the files Hermes builds the agent from: `SOUL.md` (who it is), `memories/USER.md` and `memories/MEMORY.md` in the profile's home, and the first project file with words in it in the folder Hermes's gateway works in (`.hermes.md`, `HERMES.md`, `AGENTS.md` and the rest Hermes looks for). The first profile's SOUL.md and the project file are the harness's own set, since every new agent starts from them; the first profile's memory files are the Main agent's own. Another profile's files are its agent's own until a fork reads them too. An edit is saved where Hermes reads it, only if the file is still the one the person changed. A memory file is saved as Hermes saves it, under its lock, entries apart by a line with only `§`, and an edit over Hermes's limit (2,200 and 1,375 characters unless `config.yaml` says others) is refused with how much to take out. The page says Hermes reads them when a conversation starts: a space already talking picks up a change after it next compacts |
+| Model (ADR 0141) | the models Hermes's own picker lists for the agent's profile (`GET /api/model/options`), of the providers the profile is signed in to, each as `provider/model`. A pick is asked for by each of that agent's runs (`provider` and `model` on `/v1/runs`) and changes nothing in Hermes, so it is that agent's alone, on a profile of its own or one it shares. Hermes's default, the Same as switch, is the profile's own model, set in Hermes (`hermes -p <profile> model`). Hermes says no levels of effort, so none is offered. A `model` the config names for an agent is its own until a person picks another |
 | Context window (ADR 0146) | how full the agent's session is, from the webhook below: the last model call's prompt tokens, of its model's window. A sharp drop in a session is a compaction, and a turn past half the window says its peak. Read only: the limit is the profile's `compression.threshold` (75% under 512K tokens unless set higher), and Hermes can't be asked to compact from Chips. Nothing is shown until Hermes's first reading |
 
 Not yet:
 - Hermes's clarify questions (their event isn't documented).
 - Its cron jobs as Chips schedules (ADR 0157).
-- Its model list as the agent's Model group.
+- A model's levels of effort (Hermes lists none per model).
 
 **How full each context is: Hermes's webhook.** Hermes's API server reports no window during a
 run, so the bridge adds an outbound webhook to each profile's `config.yaml` when it starts (and

@@ -9,8 +9,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, it } from "node:test";
 import { type FakeChips, type StoredEvent, startFakeChips } from "@chipschat/conformance";
-import { type Chips, connect, type Decision } from "@chipschat/harness";
-import { type AgentFork, type Feedback, messageIdOf, newId } from "@chipschat/protocol";
+import { type Chips, connect, type Decision, type Refuse } from "@chipschat/harness";
+import { type AgentFork, type Feedback, messageIdOf, type ModelChangeFrame, newId } from "@chipschat/protocol";
 import {
   Bridge,
   type BridgeState,
@@ -301,6 +301,9 @@ describe("a Hermes profile of its own for each agent made in Chips (Chips ADR 02
     await said(chips, "plan the trip", room);
     const ran = hermes.started.at(-1);
     assert.deepEqual([ran?.profile, ran?.sessionId], ["nova", state.sessions[`${agentId}|${room}`]]);
+    // Its models are its profile's (Chips ADR 0141).
+    await until(() => chips.settings.copy("model", agentId) !== undefined);
+    assert.ok(hermes.optionsAsked.includes("nova"), hermes.optionsAsked.join(", "));
   });
 
   it("restarts Hermes's gateway once when it serves only the profile it started with", async () => {
@@ -1174,5 +1177,102 @@ describe("its health", () => {
 describe("its Restart (Chips ADR 0094)", () => {
   it("asks for restarts when it joins with a code", () => {
     assert.ok(WANTS.includes("restarts"), "so Chips offers Restart on its page");
+  });
+});
+
+// Hermes's agents had no Model group: its model list wasn't asked for (Chips ADRs 0141, 0241).
+describe("an agent's model (Chips ADR 0141)", () => {
+  /** A person's pick on an agent's page, as Chips sends it. */
+  const pick = (r: Rig, agentId: string, model: string | null): ModelChangeFrame => ({
+    frame: "model.change",
+    change_id: newId("change"),
+    harness_id: r.client.harnessId,
+    agent_id: agentId,
+    model,
+    effort: null,
+    asked_by: r.chips.workspace.owner.participantId,
+    asked_at: new Date().toISOString(),
+  });
+
+  it("shows the models Hermes has for the agent's profile, and Hermes's default", async () => {
+    const r = await rig();
+    await until(() => r.chips.settings.copy("model", r.agentId) !== undefined);
+    assert.deepEqual(r.chips.settings.copy("model", r.agentId), {
+      model: "fake/heron-2",
+      own: false,
+      default: { label: "Hermes's default", model: "fake/heron-2" },
+      choices: [
+        { id: "fake/heron-2", label: "heron-2 · Fake", efforts: [] },
+        { id: "fake/heron-mini", label: "heron-mini · Fake", efforts: [] },
+        { id: "kite/kite-1", label: "kite-1 · Kite", efforts: [] },
+      ],
+      editable: true,
+    });
+    assert.deepEqual([...new Set(r.hermes.optionsAsked)], ["default"]);
+    assert.ok(WANTS.includes("models"), "so Chips shows Hermes's agents a Model group");
+  });
+
+  it("asks each of the agent's runs for the model a person picked, and Hermes's default again for none", async () => {
+    const r = await rig();
+    await until(() => r.chips.settings.copy("model", r.agentId) !== undefined);
+    const picked = await r.bridge.onModelChange(pick(r, r.agentId, "kite/kite-1"));
+    assert.deepEqual([picked.model, picked.own], ["kite/kite-1", true]);
+    assert.equal(r.state.models?.[r.agentId], "kite/kite-1");
+    await r.chips.say("plan the trip");
+    await until(() => r.hermes.started.length === 1);
+    assert.deepEqual([r.hermes.started[0]?.provider, r.hermes.started[0]?.model], ["kite", "kite-1"]);
+    await sent(r.chips, "run.completed");
+    const back = await r.bridge.onModelChange(pick(r, r.agentId, null));
+    assert.deepEqual([back.model, back.own], ["fake/heron-2", false]);
+    const asked = await r.chips.say("and the hotel");
+    await sent(r.chips, "run.completed", (event) => event.seq > asked.seq);
+    assert.deepEqual([r.hermes.started[1]?.provider, r.hermes.started[1]?.model], [undefined, undefined]);
+  });
+
+  it("changes nothing for the model the agent runs on, and refuses one Hermes doesn't have for its profile", async () => {
+    const r = await rig();
+    await until(() => r.chips.settings.copy("model", r.agentId) !== undefined);
+    const same = await r.bridge.onModelChange(pick(r, r.agentId, "fake/heron-2"));
+    assert.deepEqual([same.model, same.own, r.state.models], ["fake/heron-2", false, undefined]);
+    await assert.rejects(r.bridge.onModelChange(pick(r, r.agentId, "gone/gone-1")), (error: Refuse) => {
+      assert.equal(error.message, "Hermes has no gone/gone-1 for this agent's profile.");
+      assert.equal((error.copy as { model?: string }).model, "fake/heron-2");
+      return true;
+    });
+    await assert.rejects(r.bridge.onModelChange(pick(r, newId("agent"), "kite/kite-1")), /isn't one of this harness's agents/);
+  });
+
+  it("takes a pick for an agent sharing the first profile for that agent alone", async () => {
+    const chips = await startFakeChips({ capabilities: ["agents", "new_agents"] });
+    open.push(() => chips.close());
+    const r = await rig({ chips });
+    const room = await chips.openRoom("Plans");
+    const { askId } = await chips.askForAgent(room, "Nova");
+    const joined = await sent(chips, "membership.added", (event) => event.payload["made_for"] === askId);
+    const nova = String(joined.payload["participant_id"]);
+    await until(() => chips.settings.copy("model", nova) !== undefined);
+    await r.bridge.onModelChange(pick(r, nova, "kite/kite-1"));
+    const asked = await chips.say("plan the trip", room);
+    await sent(chips, "run.completed", (event) => event.seq > asked.seq);
+    const home = await chips.say("hello");
+    await sent(chips, "run.completed", (event) => event.seq > home.seq);
+    assert.deepEqual(
+      r.hermes.started.map((each) => [each.profile, each.model]),
+      [
+        ["default", "kite-1"],
+        ["default", undefined],
+      ],
+    );
+    assert.equal(chips.settings.copy("model", r.agentId)?.["own"], false, "the Main agent's is its own");
+  });
+
+  it("shows a model the config names as the agent's own, and asks for it alone as before", async () => {
+    const r = await rig({ model: "heron-mini" });
+    await until(() => r.chips.settings.copy("model", r.agentId) !== undefined);
+    const copy = r.chips.settings.copy("model", r.agentId);
+    assert.deepEqual([copy?.["model"], copy?.["own"]], ["fake/heron-mini", true]);
+    await r.chips.say("hello");
+    await sent(r.chips, "run.completed");
+    assert.deepEqual([r.hermes.started[0]?.provider, r.hermes.started[0]?.model], [undefined, "heron-mini"]);
   });
 });

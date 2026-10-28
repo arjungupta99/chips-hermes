@@ -8,6 +8,8 @@
  * address.
  */
 
+import type { ModelOptions } from "./models.js";
+
 /** One profile: where its gateway answers, and its key. */
 export interface ProfileAddress {
   /** Its gateway: `http://127.0.0.1:8642`. */
@@ -124,11 +126,21 @@ export class HermesClient {
     return typeof latest === "string" && latest !== "" ? latest : sessionId;
   }
 
+  /**
+   * The models Hermes has for this profile, as its own picker lists them: `GET /api/model/options`,
+   * only the providers the profile is set up for (`models.ts`).
+   */
+  async modelOptions(): Promise<ModelOptions> {
+    return (await this.call("GET", "/api/model/options?include_unconfigured=false")) as ModelOptions;
+  }
+
   /** A run in a session: what it is told, and under a key a retry of the same turn repeats. */
   async startRun(input: {
     readonly text: string;
     readonly sessionId: string;
     readonly model?: string | undefined;
+    /** The model's provider, when the run asks for one other than the profile's. */
+    readonly provider?: string | undefined;
     readonly key: string;
     /** Added to the system prompt of this turn only: Hermes keeps it out of the session. */
     readonly instructions?: string | undefined;
@@ -140,6 +152,7 @@ export class HermesClient {
         input: input.text,
         session_id: input.sessionId,
         ...(input.model === undefined ? {} : { model: input.model }),
+        ...(input.provider === undefined ? {} : { provider: input.provider }),
         ...(input.instructions === undefined ? {} : { instructions: input.instructions }),
       },
       { "Idempotency-Key": input.key.slice(0, 255) },

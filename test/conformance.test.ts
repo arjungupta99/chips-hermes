@@ -1,10 +1,11 @@
 /**
  * The golden scenario of Chips's conformance kit, played against the bridge and a scripted Hermes
  * that asks before it acts: what `chips conformance custom --capabilities
- * agents,new_spaces,new_agents,context_files,context_windows,restarts` checks of it live. Hermes's
- * own files are in a temporary home, where each new agent is a profile of its own, and the
- * scripted Hermes says how full each session is through the webhook. A restart here restarts
- * nothing: what Restart does to Hermes's gateway is `gateway.test.ts`'s, on a machine of its own.
+ * agents,new_spaces,new_agents,context_files,models,context_windows,restarts` checks of it live.
+ * Hermes's own files are in a temporary home, where each new agent is a profile of its own, and
+ * the scripted Hermes lists its models and says how full each session is through the webhook. A
+ * restart here restarts nothing: what Restart does to Hermes's gateway is `gateway.test.ts`'s, on
+ * a machine of its own.
  */
 
 import { strict as assert } from "node:assert";
@@ -31,7 +32,7 @@ it("passes the golden scenario", async () => {
       beatTimeoutMs: 3000,
       subject: {
         name: "chips-hermes",
-        capabilities: ["agents", "new_spaces", "new_agents", "context_files", "context_windows", "restarts"],
+        capabilities: ["agents", "new_spaces", "new_agents", "context_files", "models", "context_windows", "restarts"],
         start: async (address) => {
           const onRestart = restarter({
             restart: async () => undefined,
@@ -76,13 +77,17 @@ it("passes the golden scenario", async () => {
         ["Talks", 1],
         ["Supervised", 1],
         ["Lives in Chips", 4],
-        ["Managed from Chips", 2],
+        ["Managed from Chips", 3],
       ],
     );
     const outcomes = Object.fromEntries(
       (report.levels[2]?.capabilities ?? []).map((each) => [each.capability, each.outcome]),
     );
     assert.equal(outcomes["new_spaces"], "passed");
+    const managed = Object.fromEntries(
+      (report.levels[3]?.capabilities ?? []).map((each) => [each.capability, each.outcome]),
+    );
+    assert.equal(managed["models"], "passed");
   } finally {
     await hermes.close();
   }
