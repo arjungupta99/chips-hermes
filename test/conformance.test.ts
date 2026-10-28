@@ -1,10 +1,10 @@
 /**
  * The golden scenario of Chips's conformance kit, played against the bridge and a scripted Hermes
  * that asks before it acts: what `chips conformance custom --capabilities
- * agents,new_spaces,new_agents,context_files,context_windows,restarts` checks of it live. Hermes's own files
- * are in a temporary home, and the scripted Hermes says how full each session is through the
- * webhook. A restart here restarts nothing: what Restart does to Hermes's gateway is
- * `gateway.test.ts`'s, on a machine of its own.
+ * agents,new_spaces,new_agents,context_files,context_windows,restarts` checks of it live. Hermes's
+ * own files are in a temporary home, where each new agent is a profile of its own, and the
+ * scripted Hermes says how full each session is through the webhook. A restart here restarts
+ * nothing: what Restart does to Hermes's gateway is `gateway.test.ts`'s, on a machine of its own.
  */
 
 import { strict as assert } from "node:assert";
@@ -16,7 +16,7 @@ import { formatReport, runConformance } from "@chipschat/conformance";
 import { type Chips, connect } from "@chipschat/harness";
 import { Bridge, settingsFor } from "../src/bridge.ts";
 import { restarter } from "../src/gateway.ts";
-import { startFakeHermes } from "./fake-hermes.ts";
+import { fakeProfiles, startFakeHermes } from "./fake-hermes.ts";
 
 it("passes the golden scenario", async () => {
   const hermes = await startFakeHermes({ askFirst: true });
@@ -50,10 +50,13 @@ it("passes the golden scenario", async () => {
             env: {},
             fills: { port: 0, secret: "conformance" },
             fillsEveryMs: 0,
+            // Each new agent and each new space's agent a profile of its own (Chips ADR 0241).
+            profiles: fakeProfiles(root),
           });
           await bridge.start();
           const started = bridge;
           hermes.hook = { url: (profile) => started.hookUrl(profile), secret: "conformance" };
+          hermes.root = root;
         },
         stop: async () => {
           bridge?.stop();

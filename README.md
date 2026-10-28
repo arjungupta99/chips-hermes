@@ -5,11 +5,14 @@ on Hermes's own API server.
 - Each Hermes profile you name is a Chips agent. The first is the harness's Main agent.
 - Each Chips room an agent is in is a Hermes session of its profile, made the first time somebody
   there speaks to it.
-- A new agent a person asks for in a room (Add, then a new one) runs on the first profile, in a
-  session of its own. So does the agent of a space a person asks Hermes for from the +.
+- A new agent a person asks for in a room (Add, then a new one) is a Hermes profile of its own,
+  cloned from the Main agent's, so it remembers only its own conversations (below). So is the agent
+  of a space a person asks Hermes for from the +. An agent made before 1.0.8 runs on the first
+  profile, in a session of its own, as it did.
 - A copy of an agent a person asks for in another room (Fork) is a fork of its session there in
   Hermes, so it remembers everything the agent did; from then on the two go on apart. It runs on
-  its original's profile, in its original's folder.
+  its original's profile, in its original's folder: Hermes forks a session only within its
+  profile, so a copy has no profile of its own.
 
 Apache-2.0. Not published: a local repository until Chips's SDK is.
 
@@ -31,7 +34,7 @@ Apache-2.0. Not published: a local repository until Chips's SDK is.
 | A steer, a follow-up, an interrupt | `POST …/steer`; the next run of the turn; stop, then the next run with the words |
 | Trouble on the harness | `GET /health` every 30 s, per profile |
 | Restart on its page (ADR 0094) | Hermes's gateway restarted on this machine, and Hermes shown as restarting until its API server answers again (below) |
-| Context (ADRs 0134, 0238) | the files Hermes builds the agent from: `SOUL.md` (who it is), `memories/USER.md` and `memories/MEMORY.md` in the profile's home, and the first project file with words in it in the folder Hermes's gateway works in (`.hermes.md`, `HERMES.md`, `AGENTS.md` and the rest Hermes looks for). The first profile's files and the project file are the harness's own set, since every new agent reads them; another profile's files are the agent's own until a fork reads them too. An edit is saved where Hermes reads it, only if the file is still the one the person changed. A memory file is saved as Hermes saves it, under its lock, entries apart by a line with only `§`, and an edit over Hermes's limit (2,200 and 1,375 characters unless `config.yaml` says others) is refused with how much to take out. The page says Hermes reads them when a conversation starts: a space already talking picks up a change after it next compacts |
+| Context (ADRs 0134, 0238) | the files Hermes builds the agent from: `SOUL.md` (who it is), `memories/USER.md` and `memories/MEMORY.md` in the profile's home, and the first project file with words in it in the folder Hermes's gateway works in (`.hermes.md`, `HERMES.md`, `AGENTS.md` and the rest Hermes looks for). The first profile's SOUL.md and the project file are the harness's own set, since every new agent starts from them; the first profile's memory files are the Main agent's own. Another profile's files are its agent's own until a fork reads them too. An edit is saved where Hermes reads it, only if the file is still the one the person changed. A memory file is saved as Hermes saves it, under its lock, entries apart by a line with only `§`, and an edit over Hermes's limit (2,200 and 1,375 characters unless `config.yaml` says others) is refused with how much to take out. The page says Hermes reads them when a conversation starts: a space already talking picks up a change after it next compacts |
 | Context window (ADR 0146) | how full the agent's session is, from the webhook below: the last model call's prompt tokens, of its model's window. A sharp drop in a session is a compaction, and a turn past half the window says its peak. Read only: the limit is the profile's `compression.threshold` (75% under 512K tokens unless set higher), and Hermes can't be asked to compact from Chips. Nothing is shown until Hermes's first reading |
 
 Not yet:
@@ -54,7 +57,8 @@ hooks:
 ```
 
 It only ever adds: with no `hooks:` it appends this block, and under a `hooks:` with no
-`outbound:` yet it puts `outbound:` first. Anything else it leaves as it is, and its log says the
+`outbound:` yet it puts `outbound:` first. (In a profile it has just had Hermes make, it moves the
+copied entry to the profile's address.) Anything else it leaves as it is, and its log says the
 lines to add. The secret goes in the profile's `.env`, which Hermes loads into its gateway; a
 profile with no `.env` gets the secret in the entry instead. Hermes reads its hooks when its
 gateway starts, so after the bridge adds one, start `hermes gateway` again once (the setup step
@@ -151,6 +155,32 @@ says so.
 first time it is spoken to and kept by its Chips agent after a rename. Each run tells the agent it
 is its folder, in the run's `instructions`. The files an answer sends go to the room from there and
 from nowhere else.
+
+**Each new agent, a profile of its own.** An agent made in Chips (Add, then a new one, or a
+space from the +) gets a Hermes profile, made by Hermes with
+`hermes profile create <name> --clone-from <the Main agent's> --no-alias`:
+- It starts with the Main agent's `config.yaml` (its model and tools), the keys in its `.env`,
+  its skills and plugins, and its `SOUL.md` to start from. Hermes leaves out messaging channels.
+  No `<name>` shortcut is made: `hermes -p <name>` reaches it.
+- Its memory starts empty: the bridge takes out the copies of `memories/MEMORY.md` and `USER.md`.
+- Hermes counts its API server as a messaging channel, so the clone has no `API_SERVER_KEY`, and
+  Hermes answers `/p/<name>` only with that profile's own. The bridge adds one, a new random key,
+  to the profile's `.env`, and reads it from there.
+- Chips's webhook (above) is moved to the profile's own address, `/chips-hermes/<name>`.
+
+The profile is named after the agent when it is made, in lowercase letters, digits and `-`
+(`nova`, `nova-2` when Hermes has a `nova` already), and keeps that name after a rename, as the
+agent's folder does. Deleting the agent in Chips leaves its profile in Hermes: what it learned is
+yours to delete, with `hermes profile delete <name>`. `~/.chips-hermes/sessions.json` remembers
+which profile is whose.
+
+The one gateway serves every profile under `/p/<name>`, and takes a new one at once when the bridge
+asks over its control socket (`rescan-profiles`, as `hermes profile create` does). But a gateway
+that started when Hermes had only its default profile serves that one alone until it starts
+again. Then the bridge restarts it once, as Restart does (above), and its log says so; from then
+on it serves every profile. Hermes's gateway also keeps sending a new profile's readings to the
+Main agent's address until it starts again, which the bridge drops. Where Hermes doesn't make a
+profile, the agent runs on the first profile, in a session of its own, and the log says why.
 
 **More than one agent.** Name them in `~/.chips-hermes/config.json` (see `config.example.json`).
 Each agent is one of three:

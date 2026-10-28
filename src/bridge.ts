@@ -2,9 +2,11 @@
  * Hermes Agent as one Chips harness, on its Runs API. Each configured profile is a Chips agent
  * (ADR 0087), registered by its own key. The first is the harness's Main agent, in the harness's
  * own room in the place of the default agent Chips gave the harness there, and it answers for
- * that default agent, and for any other of the harness's Chips doesn't name here: a new agent a
- * person asks for in a room (Chips ADR 0108) is one. A room an agent is in is one Hermes session
- * of its profile, made the first time somebody there speaks to it, and kept across restarts.
+ * that default agent. An agent a person makes in Chips (a new one in a room, Chips ADR 0108, or a
+ * space's from the +) is a Hermes profile of its own, cloned from the Main agent's (Chips ADR 0241,
+ * `profiles.ts`); one made before that, or where Hermes couldn't make one, runs on the first
+ * profile. A room an agent is in is one Hermes session of its profile, made the first time
+ * somebody there speaks to it, and kept across restarts.
  *
  * A message for an agent is a run, the same on both sides:
  * - It starts with `POST /v1/runs`, telling the session what Chips hands over: the room note, what
@@ -23,7 +25,8 @@
  *
  * A copy of an agent a person asks for in another room (ADR 0087, Fork) is a fork of its session
  * in Hermes: the copy remembers everything the agent did, and from then on the two go on apart. It
- * answers through its original's profile and works in its original's folder.
+ * answers through its original's profile, since Hermes forks a session only within its profile,
+ * and works in its original's folder.
  *
  * An agent's page in Chips shows its context (Chips ADR 0134): the files Hermes builds it from,
  * which a person may edit there (`context.ts`). It shows its context window too (Chips ADR 0146):
@@ -64,11 +67,12 @@ import {
   type WindowChangeFrame,
   type WindowCompactFrame,
 } from "@chipschat/protocol";
-import { Contexts, type Profile, type Reader } from "./context.js";
+import { Contexts, type Profile, type Reader, type Roster } from "./context.js";
 import { Fills, type KeptFills, WHY_NOT, whyReadOnly } from "./fills.js";
 import { HermesClient, HermesError, type ProfileAddress, type RunEvent, TERMINAL } from "./hermes.js";
 import { envValue, profileHome, profileName } from "./home.js";
 import { hookUrl, SECRET_ENV } from "./hooks.js";
+import { freeProfile, KEY_ENV, type ProfileMaker, readyProfile } from "./profiles.js";
 
 export interface AgentConfig {
   /** What a person sees, and its @handle: `Hermes`. */
@@ -99,9 +103,15 @@ export interface BridgeState {
   folders?: Record<string, string>;
   /**
    * A copy's Chips id → the key of the profile it answers through: its original's, whose Hermes
-   * has the copy's session (Chips ADR 0087, Fork).
+   * has the copy's session (Chips ADR 0087, Fork). For an original with a profile made for it, the
+   * key is its Chips id.
    */
   profiles?: Record<string, string>;
+  /**
+   * An agent made in Chips → the Hermes profile made for it (Chips ADR 0241), named after it then
+   * and kept after a rename, as its folder is.
+   */
+  made?: Record<string, string>;
   /** Each agent's last context window reading, and the port and secret Hermes's webhook uses. */
   fills?: KeptFills;
 }
@@ -163,6 +173,14 @@ export interface BridgeOptions {
   readonly fillsEveryMs?: number | undefined;
   /** The environment a profile's working folder may be named in (`TERMINAL_CWD`). */
   readonly env?: NodeJS.ProcessEnv | undefined;
+  /**
+   * What makes each agent made in Chips a Hermes profile of its own (Chips ADR 0241): Hermes's own
+   * CLI and gateway, unless a test hands in its own. None, or no `hermesRoot`, and such an agent
+   * runs on the first profile, in a session of its own, as it did before.
+   */
+  readonly profiles?: ProfileMaker | undefined;
+  /** Hermes's gateway restarted, as a person's Restart does: for one that serves only the profile it started with. */
+  readonly restartGateway?: (() => Promise<void>) | undefined;
 }
 
 /**
@@ -331,11 +349,13 @@ export class Bridge {
   private ours = new Set<string>();
   /** The harness's agents' names, by Chips id, for the folders named after them. */
   private readonly names = new Map<string, string>();
+  /** The agents made in Chips with a profile of their own, by Chips id (Chips ADR 0241). */
+  private readonly own = new Map<string, Running>();
   /** The feedback events answered with a turn, the newest `KEPT_FEEDBACK`. */
   private readonly lookedAt = new Set<string>();
   /**
-   * The spaces claimed and the copies made, one after another: a message for an agent not known
-   * yet waits for them (see `copy`).
+   * The agents made, the spaces claimed and the copies made, one after another: a message for an
+   * agent not settled yet waits for them (see `runnerOf`).
    */
   private making: Promise<void> = Promise.resolve();
   private readonly log: (line: string) => void;
@@ -396,10 +416,16 @@ export class Bridge {
       const client = this.options.clientFor?.(config) ?? new HermesClient(config.address);
       this.agents.push({ config, key, client, agentId: registered.agentId, up: true });
     }
+    for (const [agentId, profile] of Object.entries(this.options.state.made ?? {})) {
+      const running = this.runningOn(agentId, profile, known.find((agent) => agent.agentId === agentId)?.name ?? profile);
+      if (running !== undefined) this.own.set(agentId, running);
+    }
     this.ours = new Set([...known.map((agent) => agent.agentId), ...this.agents.map((agent) => agent.agentId)]);
     chips.on("message.new", (message) => void this.hear(message));
     chips.on("agent.asked", (asked) => {
-      this.make(asked).catch((error: unknown) => this.log(`a new agent went wrong: ${messageOf(error)}`));
+      this.making = this.making
+        .then(() => this.make(asked))
+        .catch((error: unknown) => this.log(`a new agent went wrong: ${messageOf(error)}`));
     });
     chips.on("agent.fork", (fork) => {
       this.making = this.making
@@ -506,15 +532,23 @@ export class Bridge {
 
   /** The profile an agent runs on: its own, a copy's original's, else the first (as `profileOf` picks). */
   private profileFor(agentId: string): Profile | undefined {
-    const own = this.agents.find((agent) => agent.agentId === agentId);
+    const own = this.agents.find((agent) => agent.agentId === agentId) ?? this.own.get(agentId);
     const copied = this.options.state.profiles?.[agentId];
-    const original = this.agents.find((agent) => copied !== undefined && agent.key === copied);
-    const running = own ?? original ?? this.agents[0];
+    const running = own ?? (copied === undefined ? undefined : this.byKey(copied)) ?? this.agents[0];
     return running === undefined ? undefined : this.profileOfRunning(running);
   }
 
-  /** Who reads what: each active agent with its profile, and the first profile, which new agents run on. */
-  private roster(): { readers: Reader[]; first: Profile | undefined } {
+  /** A profile the bridge speaks to, by its key: a configured agent's, or a made agent's Chips id. */
+  private byKey(key: string): Running | undefined {
+    return this.agents.find((agent) => agent.key === key) ?? this.own.get(key);
+  }
+
+  /**
+   * Who reads what: each active agent with its profile, and the first profile, whose SOUL.md each
+   * new agent starts from (and whose every file each new agent reads, where none gets a profile of
+   * its own).
+   */
+  private roster(): Roster {
     const readers: Reader[] = [];
     const ids = new Set([...this.active().map((agent) => agent.agentId), ...this.agents.map((agent) => agent.agentId)]);
     for (const agentId of ids) {
@@ -523,7 +557,11 @@ export class Bridge {
       if (profile !== undefined) readers.push({ agentId, profile });
     }
     const first = this.agents[0];
-    return { readers, first: first === undefined ? undefined : this.profileOfRunning(first) };
+    return {
+      readers,
+      first: first === undefined ? undefined : this.profileOfRunning(first),
+      ownProfiles: this.options.profiles !== undefined,
+    };
   }
 
   /** The agent a Hermes session the bridge keeps is, with its profile: nothing for any other. */
@@ -599,7 +637,7 @@ export class Bridge {
   /**
    * A person asked for a new agent in a room (Chips ADR 0108): one of the harness's, keyed by the
    * ask so an ask heard twice makes one, registered for the room, which Chips puts it in while the
-   * room waits. It answers through the first profile, in a session of its own.
+   * room waits. It answers through a Hermes profile of its own (`ownProfile`).
    */
   private async make(asked: AgentAsked): Promise<void> {
     const { chips } = this.options;
@@ -610,17 +648,77 @@ export class Bridge {
       madeFor: asked.id,
       spaceId: asked.space_id,
     });
-    this.ours.add(agent.agentId);
     this.names.set(agent.agentId, agent.name);
     this.log(`${agent.name} made${agent.attached === false ? `, not in the room: ${agent.why ?? "too late"}` : ""}`);
+    await this.ownProfile(agent.agentId, agent.name);
+    this.ours.add(agent.agentId);
     void this.agentsMoved();
+  }
+
+  /**
+   * A Hermes profile of its own for an agent made in Chips (Chips ADR 0241), so it remembers only
+   * its own conversations: named after the agent, cloned from the Main agent's profile so it starts
+   * with its model, keys, tools, skills and SOUL.md, its memory empty (`profiles.ts`). The gateway
+   * is asked to serve it now; one that serves only the profile it started with, as Hermes's does
+   * when it started with one, is restarted once. Where Hermes doesn't make one, the agent runs on
+   * the first profile, in a session of its own, and the log says why.
+   */
+  private async ownProfile(agentId: string, name: string): Promise<void> {
+    const { profiles, hermesRoot: root, state } = this.options;
+    const main = this.agents[0];
+    if (profiles === undefined || root === undefined || main === undefined || this.own.has(agentId)) return;
+    const from = profileName(main.config.address.profile);
+    const profile = freeProfile(root, name, Object.values(state.made ?? {}));
+    const home = profileHome(root, profile);
+    const secret = state.fills?.secret ?? this.options.fills?.secret;
+    try {
+      await profiles.create(profile, from);
+      const port = this.fillsPort;
+      const hook = readyProfile(home, { from, profile }, port === undefined || secret === undefined ? undefined : { port, secret });
+      if (hook?.state === "by_hand") this.log(`context window: ${hook.path} was left as it is: ${hook.why}. Add these lines to it:\n${hook.lines}`);
+    } catch (error) {
+      this.log(`${name} runs on the ${from} profile, in a session of its own: Hermes didn't make it one (${messageOf(error)})`);
+      return;
+    }
+    state.made = { ...state.made, [agentId]: profile };
+    this.options.saveState(state);
+    const running = this.runningOn(agentId, profile, name);
+    if (running !== undefined) this.own.set(agentId, running);
+    this.log(`${name} has a Hermes profile of its own, ${profile}, cloned from ${from}`);
+    const served = await profiles.serve().catch(() => undefined);
+    if (served === false) {
+      this.log(`Hermes's gateway serves only the profile it started with, as it does when there was one: restarting it once, so it serves ${profile} too`);
+      await this.options.restartGateway?.();
+    } else if (served === undefined) {
+      this.log(`Hermes's gateway didn't answer on its control socket: it serves ${profile} once it looks again, or starts again`);
+    }
+  }
+
+  /**
+   * A profile made for an agent, as the bridge reaches it: under `/p/<profile>` of the gateway the
+   * Main agent is reached at, with the key in the profile's own `.env`.
+   */
+  private runningOn(agentId: string, profile: string, name: string): Running | undefined {
+    const main = this.agents[0];
+    const root = this.options.hermesRoot;
+    if (main === undefined || root === undefined) return undefined;
+    const home = profileHome(root, profile);
+    const config: AgentConfig = {
+      name,
+      address: { url: main.config.address.url, profile, key: envValue(home, KEY_ENV) ?? "" },
+      keyEnv: KEY_ENV,
+      keyFrom: join(home, ".env"),
+    };
+    const client = this.options.clientFor?.(config) ?? new HermesClient(config.address);
+    return { config, key: agentId, client, agentId, up: true };
   }
 
   /**
    * A space a person asked the harness for from the + (Chips ADR 0241), as the ACP bridge takes
    * one: claimed under a key made from the space, so a space handed over twice is claimed once,
-   * and named from its first words. Chips makes the agent of that key and puts it in the space. It
-   * answers the first words, which are the ask's and aren't heard again, in a session of its own.
+   * and named from its first words. Chips makes the agent of that key and puts it in the space; it
+   * gets a Hermes profile of its own (`ownProfile`). It answers the first words, which are the
+   * ask's and aren't heard again.
    */
   private async claim(asked: SpaceAsked): Promise<void> {
     const { chips } = this.options;
@@ -632,9 +730,10 @@ export class Bridge {
       this.log(`claimed ${spaceId}, and Chips put no agent there`);
       return;
     }
-    this.ours.add(agent.agentId);
     this.names.set(agent.agentId, agent.name);
     this.log(`${agent.name} claimed ${spaceId}`);
+    await this.ownProfile(agent.agentId, agent.name);
+    this.ours.add(agent.agentId);
     void this.agentsMoved();
     // Said to the agent as a message of the person's, under the first words' own id.
     const message = {
@@ -658,7 +757,8 @@ export class Bridge {
    * A person asked for a copy of one of the harness's agents in another room (ADR 0087, Fork): the
    * agent's session in the room it is in, else the last it had, forked in Hermes, is the copy's
    * session in the room asked. The copy answers through its original's profile, whose Hermes has
-   * that session, and works in its original's folder. It is registered with `forkedFrom` for the
+   * that session (Hermes forks a session only within its profile, so a copy gets no profile of its
+   * own: Chips ADR 0241), and works in its original's folder. It is registered with `forkedFrom` for the
    * room, which Chips puts it in while the room waits. The fork and the copy are keyed by the ask,
    * so an ask heard twice forks once (Hermes refuses the id again) and registers the same copy. An
    * agent that never spoke is copied with nothing to remember. A turn still going is not in the
@@ -847,24 +947,27 @@ export class Bridge {
   }
 
   /**
-   * Which profile answers for a Chips agent, as `profileOf` says. An agent not known yet may be a
-   * copy being made, which is waited for, so that its first message is answered in its session.
+   * Which profile answers for a Chips agent, as `profileOf` says. An agent not settled may be one
+   * being made, or a copy, which is waited for, so that its first message is answered on its own
+   * profile, or in the session it was forked.
    */
   private async runnerOf(taker: string): Promise<Running | undefined> {
-    if (taker !== this.options.chips.harnessId && !this.ours.has(taker)) await this.making;
+    const settled =
+      taker === this.options.chips.harnessId || this.own.has(taker) || this.agents.some((agent) => agent.agentId === taker);
+    if (!settled) await this.making;
     return this.profileOf(taker);
   }
 
   /**
-   * Which profile answers for a Chips agent: its own; a copy's original's; or the first for the
-   * harness itself and for any other of the harness's — its default agent, one Chips made since —
-   * read afresh once when a name is new.
+   * Which profile answers for a Chips agent: its own, configured or made for it; a copy's
+   * original's; or the first for the harness itself and for any other of the harness's — its
+   * default agent, one made before profiles were — read afresh once when a name is new.
    */
   private async profileOf(taker: string): Promise<Running | undefined> {
-    const own = this.agents.find((agent) => agent.agentId === taker);
+    const own = this.agents.find((agent) => agent.agentId === taker) ?? this.own.get(taker);
     if (own !== undefined) return own;
     const copied = this.options.state.profiles?.[taker];
-    const original = this.agents.find((agent) => copied !== undefined && agent.key === copied);
+    const original = copied === undefined ? undefined : this.byKey(copied);
     if (original !== undefined) return original;
     if (taker !== this.options.chips.harnessId && !this.ours.has(taker)) {
       const listed = await this.options.chips.agents.list().catch(() => []);

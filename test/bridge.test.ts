@@ -4,7 +4,7 @@
  */
 
 import { strict as assert } from "node:assert";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, it } from "node:test";
@@ -24,7 +24,9 @@ import {
   WANTS,
 } from "../src/bridge.ts";
 import { HermesClient } from "../src/hermes.ts";
-import { type FakeHermes, startFakeHermes } from "./fake-hermes.ts";
+import { envValue } from "../src/home.ts";
+import type { ProfileMaker } from "../src/profiles.ts";
+import { type FakeHermes, fakeProfiles, startFakeHermes } from "./fake-hermes.ts";
 
 interface Rig {
   readonly chips: FakeChips;
@@ -59,6 +61,10 @@ async function rig(
     also?: readonly { name: string; profile: string }[];
     /** What the bridge is handed in the client's place: a test's tap on it. */
     chipsFor?: (client: Chips) => Chips;
+    /** Hermes's root, and what makes each agent made in Chips a profile of its own there (Chips ADR 0241). */
+    hermesRoot?: string;
+    profiles?: ProfileMaker;
+    restartGateway?: () => Promise<void>;
   } = {},
 ): Promise<Rig> {
   const chips = options.chips ?? (await startFakeChips({ capabilities: ["agents"] }));
@@ -87,6 +93,9 @@ async function rig(
     saveState: () => undefined,
     healthEveryMs: 50,
     log: (line) => void logs.push(line),
+    ...(options.hermesRoot === undefined ? {} : { hermesRoot: options.hermesRoot, env: {} }),
+    ...(options.profiles === undefined ? {} : { profiles: options.profiles }),
+    ...(options.restartGateway === undefined ? {} : { restartGateway: options.restartGateway }),
   });
   open.push(async () => {
     bridge.stop();
@@ -223,6 +232,173 @@ describe("a space a person asks for from the + (Chips ADR 0241)", () => {
       "Work out why the nightly backup to the NAS…",
     );
     assert.ok(WANTS.includes("new_spaces"), "so the + offers Hermes");
+  });
+});
+
+// A new agent ran on the Main agent's profile, so two Hermes agents in Chips were one Hermes
+// remembering for both (Chips ADR 0241).
+describe("a Hermes profile of its own for each agent made in Chips (Chips ADR 0241)", () => {
+  /** A Chips, the bridge, and Hermes's default profile in a root of the test's, with what makes profiles there. */
+  async function withProfiles(options: Parameters<typeof rig>[0] = {}) {
+    const chips = options.chips ?? (await startFakeChips({ capabilities: ["agents", "new_spaces", "new_agents", "forks"] }));
+    if (options.chips === undefined) open.push(() => chips.close());
+    const root = options.hermesRoot ?? mkdtempSync(join(tmpdir(), "chips-hermes-profiles-"));
+    if (options.hermesRoot === undefined) {
+      open.push(async () => rmSync(root, { recursive: true, force: true }));
+      writeFileSync(join(root, "config.yaml"), "model:\n  default: heron-2\n  provider: fake\n");
+      writeFileSync(join(root, ".env"), "API_SERVER_ENABLED=true\nAPI_SERVER_KEY=hermes-test-key\nFAKE_API_KEY=k\n", { mode: 0o600 });
+      writeFileSync(join(root, "SOUL.md"), "You are Hermes.\n");
+      mkdirSync(join(root, "memories"));
+      writeFileSync(join(root, "memories", "MEMORY.md"), "Arjun likes tea");
+      writeFileSync(join(root, "memories", "USER.md"), "Arjun is an engineer");
+    }
+    const profiles = fakeProfiles(root);
+    const restarts: string[] = [];
+    const made = await rig({
+      chips,
+      hermesRoot: root,
+      profiles,
+      restartGateway: async () => void restarts.push("restarted"),
+      ...options,
+    });
+    made.hermes.root = root;
+    return { ...made, root, profiles, restarts };
+  }
+
+  /** A new agent asked for in a room of its own, once it has a profile or the log says why not. */
+  async function asked(r: Pick<Rig, "chips" | "state" | "logs">, name: string) {
+    const room = await r.chips.openRoom("Plans");
+    const { askId } = await r.chips.askForAgent(room, name);
+    const joined = await sent(r.chips, "membership.added", (event) => event.payload["made_for"] === askId);
+    const agentId = String(joined.payload["participant_id"]);
+    await until(() => r.state.made?.[agentId] !== undefined || r.logs.some((line) => line.includes("Hermes didn't make it one")));
+    return { room, agentId };
+  }
+
+  /** Words said in a room, to the end of the turn they were. */
+  async function said(chips: FakeChips, words: string, room: string): Promise<void> {
+    const asked = await chips.say(words, room);
+    const started = await sent(chips, "run.started", (event) => event.seq > asked.seq && event.space_id === room);
+    await sent(chips, "run.completed", (event) => event.run_id === started.run_id);
+  }
+
+  it("clones the Main agent's profile for a new agent, its memory empty and its key its own, and answers there", async () => {
+    const r = await withProfiles();
+    const { chips, hermes, state, root, profiles, restarts } = r;
+    const { room, agentId } = await asked(r, "Nova");
+    assert.deepEqual(profiles.made, [{ name: "nova", from: "default" }]);
+    assert.equal(state.made?.[agentId], "nova");
+    const home = join(root, "profiles", "nova");
+    assert.equal(readFileSync(join(home, "SOUL.md"), "utf8"), "You are Hermes.\n", "its persona to start from");
+    assert.equal(envValue(home, "FAKE_API_KEY"), "k", "the Main agent's keys");
+    assert.ok(!existsSync(join(home, "memories", "MEMORY.md")), "its memory starts empty");
+    assert.ok(!existsSync(join(home, "memories", "USER.md")));
+    const key = envValue(home, "API_SERVER_KEY") ?? "";
+    assert.match(key, /^[0-9a-f]{64}$/, "a key of its own for /p/nova");
+    assert.notEqual(key, hermes.key);
+    assert.equal(profiles.asked, 1, "the gateway asked to serve it");
+    assert.deepEqual(restarts, [], "a gateway that multiplexes isn't restarted");
+    await said(chips, "plan the trip", room);
+    const ran = hermes.started.at(-1);
+    assert.deepEqual([ran?.profile, ran?.sessionId], ["nova", state.sessions[`${agentId}|${room}`]]);
+  });
+
+  it("restarts Hermes's gateway once when it serves only the profile it started with", async () => {
+    const r = await withProfiles();
+    const { profiles, logs, restarts } = r;
+    profiles.answers = [false, true];
+    await asked(r, "Nova");
+    assert.deepEqual(restarts, ["restarted"]);
+    assert.ok(logs.some((line) => line.startsWith("Hermes's gateway serves only the profile it started with")), logs.join("\n"));
+    await asked(r, "Vega");
+    assert.deepEqual(restarts, ["restarted"], "once");
+    assert.deepEqual(
+      profiles.made.map((each) => each.name),
+      ["nova", "vega"],
+    );
+  });
+
+  it("names the next agent of the same name -2, and keeps each on its profile when the bridge starts again", async () => {
+    const first = await withProfiles();
+    const nova = await asked(first, "Nova");
+    const second = await asked(first, "Nova");
+    assert.deepEqual(
+      first.profiles.made.map((each) => each.name),
+      ["nova", "nova-2"],
+    );
+    first.bridge.stop();
+    first.client.close();
+    const again = await withProfiles({ chips: first.chips, hermes: first.hermes, state: first.state, hermesRoot: first.root });
+    await said(again.chips, "plan the trip", nova.room);
+    await said(again.chips, "and the hotel", second.room);
+    assert.deepEqual(
+      again.hermes.started.slice(-2).map((each) => each.profile),
+      ["nova", "nova-2"],
+    );
+    assert.deepEqual(again.profiles.made, [], "no profile made again");
+  });
+
+  it("runs a new agent on the first profile when Hermes doesn't make it one, and says why", async () => {
+    const r = await withProfiles();
+    const { chips, hermes, state, profiles, logs } = r;
+    profiles.refuse = "Profile name 'nova' is reserved";
+    const { room, agentId } = await asked(r, "Nova");
+    assert.ok(logs.includes("Nova runs on the default profile, in a session of its own: Hermes didn't make it one (Profile name 'nova' is reserved)"), logs.join("\n"));
+    assert.equal(state.made?.[agentId], undefined);
+    await said(chips, "plan the trip", room);
+    assert.deepEqual([hermes.started.at(-1)?.profile, hermes.started.at(-1)?.sessionId], ["default", state.sessions[`${agentId}|${room}`]]);
+  });
+
+  it("leaves an agent made before profiles on the first profile, with its sessions", async () => {
+    const chips = await startFakeChips({ capabilities: ["agents", "new_agents"] });
+    open.push(() => chips.close());
+    const before = await rig({ chips });
+    const room = await chips.openRoom("Plans");
+    const { askId } = await chips.askForAgent(room, "Nova");
+    const joined = await sent(chips, "membership.added", (event) => event.payload["made_for"] === askId);
+    const nova = String(joined.payload["participant_id"]);
+    await said(chips, "plan the trip", room);
+    const session = before.state.sessions[`${nova}|${room}`];
+    before.bridge.stop();
+    before.client.close();
+    const after = await withProfiles({ chips, hermes: before.hermes, state: before.state });
+    await said(chips, "and the hotel", room);
+    const ran = after.hermes.started.at(-1);
+    assert.deepEqual([ran?.profile, ran?.sessionId], ["default", session]);
+    assert.match(ran?.history[0] ?? "", /plan the trip$/, "it remembers");
+    assert.deepEqual(after.profiles.made, []);
+  });
+
+  it("makes the agent of a space from the + a profile of its own", async () => {
+    const { chips, client, hermes, state, profiles } = await withProfiles();
+    const { spaceId } = await chips.askForSpace("Plan a weekend in Lisbon for two");
+    await sent(chips, "run.completed", (event) => event.space_id === spaceId);
+    const agent = (await client.agents.list()).find((each) => each.key === `hermes:space:${spaceId}`);
+    const profile = state.made?.[agent?.agentId ?? ""] ?? "";
+    assert.equal(profiles.made[0]?.name, profile);
+    assert.equal(hermes.started.at(-1)?.profile, profile);
+  });
+
+  it("copies an agent with a profile of its own on that profile, where Hermes forks its session", async () => {
+    const r = await withProfiles();
+    const { chips, client, hermes, state, profiles } = r;
+    const { room, agentId } = await asked(r, "Nova");
+    await said(chips, "plan the trip", room);
+    const second = await chips.openRoom("Second opinion");
+    const { forkId } = await chips.askForFork(agentId, second);
+    const joined = await sent(chips, "membership.added", (event) => event.payload["fork_of"] === forkId);
+    const copy = String(joined.payload["participant_id"]);
+    assert.deepEqual(
+      hermes.forks.map((each) => [each.profile, each.made]),
+      [["nova", true]],
+    );
+    await until(() => state.profiles?.[copy] === agentId);
+    await said(chips, "what did we plan?", second);
+    const ran = hermes.started.at(-1);
+    assert.deepEqual([ran?.profile, ran?.sessionId], ["nova", `chips-fork-${forkId}`]);
+    assert.match(ran?.history[0] ?? "", /plan the trip$/);
+    assert.equal(profiles.made.length, 1, "no profile of its own: Hermes can't take a session to another");
+    assert.ok((await client.agents.list()).some((each) => each.agentId === copy));
   });
 });
 

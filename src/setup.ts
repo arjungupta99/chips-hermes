@@ -61,23 +61,30 @@ export function checkedWords(config: Config, restart = false): string {
 export const RESTART = "Start hermes gateway again once, so it tells Chips how full each agent's context is.";
 
 /**
- * Chips's webhook in the config of each profile the agents run on (`hooks.ts`), so Hermes says
- * how full each agent's context is, and what a person has to do for it, in lines for the log:
- * a restart of `hermes gateway` once when one was added while it runs, or lines to add by hand to
- * a config the bridge won't change. Nothing stops for it: the bridge works without it.
+ * Chips's webhook in the config of each profile the agents run on (`hooks.ts`), those made for
+ * agents in Chips among them (`made`, Chips ADR 0241), so Hermes says how full each agent's
+ * context is, and what a person has to do for it, in lines for the log: a restart of
+ * `hermes gateway` once when one was added while it runs, or lines to add by hand to a config the
+ * bridge won't change. Nothing stops for it: the bridge works without it.
  */
 export function readyHooks(
   config: Config,
-  options: { readonly root: string; readonly port: number; readonly secret: string; readonly gatewayUp: boolean },
+  options: {
+    readonly root: string;
+    readonly port: number;
+    readonly secret: string;
+    readonly gatewayUp: boolean;
+    readonly made?: readonly string[] | undefined;
+  },
 ): { readonly lines: string[]; readonly restart: boolean } {
   const lines: string[] = [];
   let restart = false;
   const done = new Set<string>();
-  for (const agent of config.agents) {
-    const profile = profileName(agent.address.profile);
+  for (const named of [...config.agents.map((agent) => agent.address.profile), ...(options.made ?? [])]) {
+    const profile = profileName(named);
     if (done.has(profile)) continue;
     done.add(profile);
-    const home = profileHome(options.root, agent.address.profile);
+    const home = profileHome(options.root, named);
     let outcome: HookOutcome;
     try {
       outcome = addHook(home, options.port, profile, options.secret);

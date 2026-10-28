@@ -25,8 +25,11 @@
  */
 
 import { createHmac, randomUUID } from "node:crypto";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
+import { join } from "node:path";
+import { envValue, profileHome } from "../src/home.ts";
 
 type Event = Record<string, unknown> & { event: string };
 
@@ -91,6 +94,11 @@ export interface FakeHermes {
   review?: number | undefined;
   /** The deliveries the webhook made, and how each was answered. */
   readonly delivered: { readonly status: number; readonly body: Record<string, unknown> }[];
+  /**
+   * Hermes's root, once a test has one: a request under `/p/<profile>` for a profile with an
+   * `API_SERVER_KEY` in its `.env` there takes that key and no other, as a multiplexing gateway does.
+   */
+  root?: string | undefined;
   close(): Promise<void>;
 }
 
@@ -327,9 +335,10 @@ export async function startFakeHermes(
     void (async () => {
       const url = new URL(request.url ?? "/", "http://fake");
       if (url.pathname === "/health") return json(response, fake.up ? 200 : 503, { status: fake.up ? "ok" : "down" });
-      if (request.headers.authorization !== `Bearer ${key}`) return json(response, 401, { error: { message: "no key" } });
       const profiled = /^\/p\/([^/]+)(\/.*)$/.exec(url.pathname);
       const profile = profiled?.[1] ?? "default";
+      const own = fake.root === undefined || profile === "default" ? undefined : envValue(profileHome(fake.root, profile), "API_SERVER_KEY");
+      if (request.headers.authorization !== `Bearer ${own ?? key}`) return json(response, 401, { error: { message: "no key" } });
       const path = profiled?.[2] ?? url.pathname;
       const method = request.method ?? "GET";
       if (method === "GET" && path === "/v1/models") {
@@ -444,4 +453,51 @@ export async function startFakeHermes(
       await new Promise<void>((resolve) => server.close(() => resolve()));
     },
   }) as FakeHermes;
+}
+
+/** Hermes's CLI and control socket for profiles, as the bridge uses them, on a root of the test's. */
+export interface FakeProfiles {
+  create(name: string, from: string): Promise<void>;
+  serve(): Promise<boolean | undefined>;
+  /** Each profile made, from which. */
+  readonly made: { readonly name: string; readonly from: string }[];
+  /** What the gateway answers when asked to serve them: the first, then the next, the last again. */
+  answers: (boolean | undefined)[];
+  /** How often it was asked. */
+  asked: number;
+  /** Words Hermes refuses the next profile with, once. */
+  refuse?: string | undefined;
+}
+
+/**
+ * Profiles made as `hermes profile create <name> --clone-from <from>` makes one in Hermes 0.22.0:
+ * the source's `config.yaml`, its `.env` without the API server's lines (a messaging channel, to
+ * Hermes), `SOUL.md` and memory files, in `profiles/<name>` under the root.
+ */
+export function fakeProfiles(root: string): FakeProfiles {
+  const fake: FakeProfiles = {
+    made: [],
+    answers: [true],
+    asked: 0,
+    async create(name, from) {
+      const refused = fake.refuse;
+      fake.refuse = undefined;
+      if (refused !== undefined) throw new Error(refused);
+      const source = profileHome(root, from);
+      const home = profileHome(root, name);
+      if (existsSync(home)) throw new Error(`Profile '${name}' already exists`);
+      mkdirSync(join(home, "memories"), { recursive: true });
+      for (const file of ["config.yaml", "SOUL.md", "memories/MEMORY.md", "memories/USER.md"]) {
+        if (existsSync(join(source, file))) copyFileSync(join(source, file), join(home, file));
+      }
+      const env = existsSync(join(source, ".env")) ? readFileSync(join(source, ".env"), "utf8") : "";
+      writeFileSync(join(home, ".env"), env.split("\n").filter((line) => !line.startsWith("API_SERVER_")).join("\n"), { mode: 0o600 });
+      fake.made.push({ name, from });
+    },
+    async serve() {
+      fake.asked += 1;
+      return fake.answers[Math.min(fake.asked - 1, fake.answers.length - 1)];
+    },
+  };
+  return fake;
 }

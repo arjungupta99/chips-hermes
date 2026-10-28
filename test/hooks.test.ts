@@ -179,4 +179,17 @@ describe("Chips's webhook in Hermes's config", () => {
     const down = mkdtempSync(join(tmpdir(), "chips-hermes-root-"));
     assert.equal(readyHooks({ ...config, agents: config.agents.slice(0, 1) }, { root: down, port: 8650, secret: SECRET, gatewayUp: false }).restart, false);
   });
+
+  it("is in each profile made for an agent in Chips too, at its own address (Chips ADR 0241)", () => {
+    const root = mkdtempSync(join(tmpdir(), "chips-hermes-root-"));
+    writeFileSync(join(root, "config.yaml"), CONFIG);
+    mkdirSync(join(root, "profiles", "nova"), { recursive: true });
+    writeFileSync(join(root, "profiles", "nova", "config.yaml"), CONFIG);
+    const folder = mkdtempSync(join(tmpdir(), "chips-hermes-config-"));
+    writeFileSync(join(folder, "config.json"), JSON.stringify({ agents: [{ name: "Hermes", profile: "default", keyEnv: "K" }] }));
+    const config = readConfig(join(folder, "config.json"), { K: "k" });
+    const ready = readyHooks(config, { root, port: 8650, secret: SECRET, gatewayUp: false, made: ["nova", "default"] });
+    assert.equal(ready.lines.length, 2);
+    assert.ok(readFileSync(join(root, "profiles", "nova", "config.yaml"), "utf8").includes(`url: ${hookUrl(8650, "nova")}`));
+  });
 });

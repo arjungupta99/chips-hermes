@@ -150,11 +150,17 @@ interface Numbers {
   readonly at: string;
 }
 
-/** A delivery's numbers, or nothing for an event or a call that says none. */
+/**
+ * A delivery's numbers, or nothing for an event or a call that says none, or one another profile
+ * sent: a profile cloned for an agent (Chips ADR 0241) has its source's webhook until the bridge
+ * moves it to its own address, and Hermes's gateway keeps sending to both until it starts again.
+ */
 export function numbersOf(profile: string, body: unknown): Numbers | undefined {
   if (typeof body !== "object" || body === null) return undefined;
   const top = body as Record<string, unknown>;
   if (top["hook_event_name"] !== "post_api_request") return undefined;
+  const sender = top["profile"];
+  if (typeof sender === "string" && sender !== profile && sender !== "custom") return undefined;
   const extra = (typeof top["extra"] === "object" && top["extra"] !== null ? top["extra"] : {}) as Record<string, unknown>;
   const named = typeof top["session_id"] === "string" ? top["session_id"] : "";
   const task = typeof extra["task_id"] === "string" && extra["task_id"] !== "" ? extra["task_id"] : undefined;

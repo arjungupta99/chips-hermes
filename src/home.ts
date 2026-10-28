@@ -10,7 +10,7 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync, readlinkSync, statSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, readFileSync, readlinkSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -45,6 +45,15 @@ export function envValue(home: string, name: string): string | undefined {
     found = quoted !== null ? (quoted[2] ?? "") : raw.replace(/\s+#.*$/, "");
   }
   return found;
+}
+
+/** A line `NAME=value` added to the end of a profile's `.env`, which keeps its mode. */
+export function appendEnv(home: string, name: string, value: string): void {
+  const path = join(home, ".env");
+  const text = readFileSync(path, "utf8");
+  const mode = statSync(path).mode & 0o777;
+  appendFileSync(path, `${text === "" || text.endsWith("\n") ? "" : "\n"}${name}=${value}\n`);
+  chmodSync(path, mode);
 }
 
 /** A profile's `config.yaml`, or nothing when it has none. */

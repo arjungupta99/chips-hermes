@@ -17,9 +17,9 @@
  * some of its keys), and the secret goes in the entry itself.
  */
 
-import { appendFileSync, chmodSync, existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { envValue } from "./home.js";
+import { appendEnv, envValue } from "./home.js";
 import { HOOK_PATH } from "./fills.js";
 import { writeWhole } from "./context.js";
 
@@ -80,11 +80,7 @@ function entryLines(indent: string, url: string, secret: { readonly env: string 
 function secretInEnv(home: string, secret: string): boolean {
   const path = join(home, ".env");
   if (!existsSync(path)) return false;
-  if (envValue(home, SECRET_ENV) !== undefined) return true;
-  const text = readFileSync(path, "utf8");
-  const mode = statSync(path).mode & 0o777;
-  appendFileSync(path, `${text === "" || text.endsWith("\n") ? "" : "\n"}${SECRET_ENV}=${secret}\n`);
-  chmodSync(path, mode);
+  if (envValue(home, SECRET_ENV) === undefined) appendEnv(home, SECRET_ENV, secret);
   return true;
 }
 

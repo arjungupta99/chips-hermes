@@ -282,6 +282,32 @@ function gatewayEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return Object.fromEntries(Object.entries(env).filter(([name]) => !name.startsWith("CHIPS_")));
 }
 
+/**
+ * `hermes <args>` run to its end, a command and not the gateway (`hermes profile create`): its exit
+ * code and what it said. Through Homebrew's expat when it died of macOS's, as the gateway is started.
+ */
+export async function runHermes(
+  system: Pick<System, "which" | "read" | "exists" | "run">,
+  env: NodeJS.ProcessEnv,
+  args: readonly string[],
+  timeoutMs: number,
+  log: (line: string) => void,
+): Promise<{ code: number | null; output: string }> {
+  const hermes = system.which("hermes", env);
+  if (hermes === undefined) return { code: null, output: "The hermes command isn't on this machine's PATH." };
+  const plain = gatewayEnv(env);
+  const ran = await system.run(hermes, args, plain, timeoutMs);
+  if (ran.code === 0 || !ran.output.includes(EXPAT_SYMBOL) || !system.exists(EXPAT)) return ran;
+  const wrapper = wrapperOf(system.read(hermes) ?? "", plain);
+  if (wrapper === undefined) return ran;
+  const expat = dirname(EXPAT);
+  log(
+    `hermes ${args.slice(0, 2).join(" ")} stopped at once: Homebrew's Python can't load macOS's expat (${EXPAT_SYMBOL}). Running ${wrapper.entry} directly with DYLD_LIBRARY_PATH=${expat}.`,
+  );
+  const libraries = [expat, plain["DYLD_LIBRARY_PATH"]].filter((each) => each !== undefined && each !== "").join(":");
+  return system.run(wrapper.entry, args, { ...plain, ...wrapper.vars, DYLD_LIBRARY_PATH: libraries }, timeoutMs);
+}
+
 export interface GatewayOptions {
   readonly gateways: readonly GatewayAt[];
   /** Hermes's root, `$HERMES_HOME` else `~/.hermes`. */

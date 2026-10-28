@@ -21,7 +21,8 @@
  *
  * Hermes's gateway, at a local address, is started with the bridge when nothing answers there, so
  * the bridge kept running from login brings Hermes back after a reboot; and a person's Restart in
- * Chips restarts it (Chips ADR 0094, `gateway.ts`).
+ * Chips restarts it (Chips ADR 0094, `gateway.ts`), as does the first agent made in Chips when the
+ * gateway serves only the one profile it started with (Chips ADR 0241, `profiles.ts`).
  *
  * `npm run keep` is the same, then keeps the bridge running from login (`keep.ts`).
  */
@@ -38,6 +39,7 @@ import { HermesClient } from "./hermes.js";
 import { hermesRoot, profileHome } from "./home.js";
 import { hookPortIn } from "./hooks.js";
 import { keepIfAsked, stopIfAsked, words } from "./keep.js";
+import { hermesProfiles } from "./profiles.js";
 import { type Config, checkedWords, checkHermes, readConfig, readyHooks, SetupError } from "./setup.js";
 
 const home = (path: string) => (path.startsWith("~/") ? join(homedir(), path.slice(2)) : path);
@@ -86,7 +88,8 @@ try {
   saveState(state);
   const first = config.agents[0];
   const gatewayUp = link !== undefined || (first !== undefined && (await new HermesClient(first.address).healthy()));
-  const hooks = readyHooks(config, { root, port: fills.port, secret: fills.secret, gatewayUp });
+  const made = Object.values(state.made ?? {});
+  const hooks = readyHooks(config, { root, port: fills.port, secret: fills.secret, gatewayUp, made });
   for (const line of hooks.lines) log(line);
   if (link !== undefined) reportStep("checked", { detail: checkedWords(config, hooks.restart) });
 } catch (error) {
@@ -163,6 +166,9 @@ bridge = new Bridge({
   log,
   hermesRoot: root,
   fills: { port: fills.port, secret: fills.secret },
+  // Each agent made in Chips is a Hermes profile of its own (Chips ADR 0241).
+  profiles: hermesProfiles({ root, env: process.env, system: thisMachine(), log: (line) => log(`profiles: ${line}`) }),
+  restartGateway: () => restart({ askedBy: "chips-hermes, for a new agent's profile", askedAt: new Date().toISOString() }),
 });
 await bridge.start();
 log(`answering for ${config.agents.map((agent) => agent.name).join(", ")} through Hermes`);

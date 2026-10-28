@@ -6,6 +6,7 @@
  */
 
 import { strict as assert } from "node:assert";
+import { createHmac } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -17,7 +18,8 @@ import { Bridge, type BridgeState, settingsFor } from "../src/bridge.ts";
 import { hashOf, READ_NOTE, withLock } from "../src/context.ts";
 import { WHY_NOT, whyReadOnly } from "../src/fills.ts";
 import { SECRET_ENV } from "../src/hooks.ts";
-import { type FakeHermes, startFakeHermes } from "./fake-hermes.ts";
+import type { ProfileMaker } from "../src/profiles.ts";
+import { type FakeHermes, fakeProfiles, startFakeHermes } from "./fake-hermes.ts";
 
 const open: (() => Promise<void>)[] = [];
 afterEach(async () => {
@@ -54,7 +56,9 @@ interface Rig {
   readonly logs: string[];
 }
 
-async function rig(options: { root?: string; state?: BridgeState; hermes?: FakeHermes; chips?: FakeChips } = {}): Promise<Rig> {
+async function rig(
+  options: { root?: string; state?: BridgeState; hermes?: FakeHermes; chips?: FakeChips; profiles?: ProfileMaker } = {},
+): Promise<Rig> {
   const chips =
     options.chips ??
     (await startFakeChips({ capabilities: ["agents", "new_agents", "forks", "context_files", "context_windows"] }));
@@ -86,6 +90,7 @@ async function rig(options: { root?: string; state?: BridgeState; hermes?: FakeH
     fills: { port: state.fills?.port ?? 0, secret: "unused-fallback" },
     fillsEveryMs: 0,
     log: (line) => void logs.push(line),
+    ...(options.profiles === undefined ? {} : { profiles: options.profiles }),
   });
   const started = bridge;
   open.push(async () => {
@@ -234,6 +239,44 @@ describe("an agent's context (Chips ADR 0134)", () => {
         ["MEMORY.md", "default-memory", false],
       ],
     );
+  });
+
+  it("gives a new agent with a profile of its own its own files, and the Main agent its own memory (Chips ADR 0241)", async () => {
+    const { root } = hermesHome();
+    const r = await rig({ root, profiles: fakeProfiles(root) });
+    r.hermes.root = root;
+    const spaceId = await r.chips.openRoom("Fresh eyes");
+    const { askId } = await r.chips.askForAgent(spaceId, "Nova");
+    const joined = await r.chips.waitFor(
+      (event) => (event.type === "membership.added" && event.payload["made_for"] === askId ? event : undefined),
+      3000,
+    );
+    const novaId = String(joined.payload["participant_id"]);
+    const nova = await until(() => {
+      const now = agentFiles(r, novaId);
+      return fileIn(now?.files, "SOUL.md")?.text !== undefined && now;
+    });
+    // Its SOUL.md a copy of the Main agent's, its memory empty, both its own; the project file the gateway's.
+    assert.deepEqual(
+      nova.files.map((file) => [file.name, file.text, file["shared"]]),
+      [
+        ["SOUL.md", "You are Hermes.\n", undefined],
+        ["AGENTS.md", undefined, "default-project"],
+        ["USER.md", "", undefined],
+        ["MEMORY.md", "", undefined],
+      ],
+    );
+    // What a new agent starts with: the Main agent's SOUL.md and the project file, not its memory.
+    const set = await until(() => harnessSet(r));
+    assert.deepEqual(
+      set.shared.map((file) => [file.name, file["used_by"], file["for_new_agents"]]),
+      [
+        ["SOUL.md", 1, true],
+        ["AGENTS.md", 2, true],
+      ],
+    );
+    const main = await until(() => agentFiles(r, r.mainId));
+    assert.equal(fileIn(main.files, "MEMORY.md")?.text, MEMORY, "the Main agent's own");
   });
 
   it("shares a profile's files once a fork reads them too, under names of their own", async () => {
@@ -389,6 +432,24 @@ describe("an agent's context window (Chips ADR 0146)", () => {
     await new Promise((resolve) => setTimeout(resolve, 100));
     assert.equal(windowOf(r, "whoever"), undefined);
     assert.equal(r.logs.filter((line) => /wasn't signed with Chips's secret/.test(line)).length, 1, "said once");
+  });
+
+  it("drops a reading another profile sent to this one's address, as a clone of it does until Hermes starts again", async () => {
+    const r = await rig();
+    await talk(r, "hello");
+    await until(() => windowOf(r, r.mainId));
+    const session = Object.values(r.state.sessions)[0] ?? "";
+    const body = JSON.stringify({
+      hook_event_name: "post_api_request",
+      profile: "nova",
+      session_id: session,
+      extra: { task_id: session, usage: { prompt_tokens: 9000 }, context_length: 200_000 },
+    });
+    const signature = createHmac("sha256", SECRET).update(body).digest("hex");
+    const answer = await fetch(r.bridge.hookUrl() ?? "", { method: "POST", body, headers: { "x-hermes-signature-256": `sha256=${signature}` } });
+    assert.equal(answer.status, 204);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.equal(windowOf(r, r.mainId)?.["used"], 2500, "nova's own address has it");
   });
 
   it("takes a sharp drop in a session for a compaction, and says the turn's peak", async () => {

@@ -18,12 +18,15 @@
  * Hermes builds a session's system prompt once and keeps it word for word until the session
  * compacts (`agent/conversation_loop.py`, `conversation_compression.py`): `READ_NOTE` says so.
  *
- * What is whose: each configured agent is a profile. A new agent asked for in a room runs on the
- * first profile, and a fork on its original's, so a profile's files are often read by several
- * agents. The first profile's are always in the harness's own set, since every new agent reads
- * them; another profile's go there once two agents read them. The project file is the gateway's,
- * and always there. An agent's page shows a file it alone reads as its own, and each shared one
- * as the harness's, which it can't have its own of (`replaceable: false`).
+ * What is whose: each configured agent is a profile, and so is each agent made in Chips (Chips ADR
+ * 0241), cloned from the first: it starts from a copy of the first profile's SOUL.md, with no
+ * memory of its own yet. A fork runs on its original's profile, and an agent made before that on
+ * the first, so a profile's files are often read by several agents. The first profile's SOUL.md is
+ * always in the harness's own set, for the new agents that start from it; so are its memory files
+ * where new agents run on the first profile and read them. Any other file goes there once two
+ * agents read it. The project file is the gateway's, and always there. An agent's page shows a
+ * file it alone reads as its own, and each shared one as the harness's, which it can't have its
+ * own of (`replaceable: false`).
  */
 
 import { spawn } from "node:child_process";
@@ -221,9 +224,11 @@ export class Picture {
 
   constructor(
     readers: readonly Reader[],
-    /** The first profile: the one new agents run on, whose files the harness's set always has. */
-    first: Profile | undefined,
+    /** The first profile: the one new agents start from, whose files the harness's set has. */
+    private readonly first: Profile | undefined,
     env: NodeJS.ProcessEnv = process.env,
+    /** Whether each new agent gets a profile of its own, not the first's memory (Chips ADR 0241). */
+    private readonly ownProfiles = false,
   ) {
     const byProfile = new Map<string, Source[]>();
     const sourcesFor = (profile: Profile): Source[] => {
@@ -244,11 +249,11 @@ export class Picture {
         this.readers.set(source.path, entry);
       }
     }
-    // Shared: the project file, the first profile's files, and any other read by two agents.
+    // Shared: the project file, the first profile's files new agents read, and any other read by two agents.
     const taken = new Set<string>();
     const ids = new Set<string>();
     const sharing = [...this.readers.values()]
-      .filter(({ source, agents }) => source.kind === "project" || source.profile === first?.name || agents.length > 1)
+      .filter(({ source, agents }) => source.kind === "project" || this.forNewAgents(source) || agents.length > 1)
       .sort((a, b) => (a.source.profile === first?.name ? 0 : 1) - (b.source.profile === first?.name ? 0 : 1) || byOrder(a.source, b.source));
     for (const { source } of sharing) {
       const name = taken.has(source.file) ? `${source.file} (${source.profile})` : source.file;
@@ -260,8 +265,17 @@ export class Picture {
     }
   }
 
+  /**
+   * Whether each new agent starts with this file or a copy of it: the first profile's files, or
+   * where each new agent gets a profile of its own, the first profile's SOUL.md and the project file.
+   */
+  private forNewAgents(source: Source): boolean {
+    if (source.profile !== this.first?.name) return false;
+    return !this.ownProfiles || source.kind === "soul" || source.kind === "project";
+  }
+
   /** The harness's own set, as `PUT /v1/harnesses/:id/context` takes it. */
-  harnessCopy(first: Profile | undefined): HarnessContextCopy {
+  harnessCopy(): HarnessContextCopy {
     const shown: Payload[] = [];
     const notShown: Payload[] = [];
     for (const [path, { id, name }] of this.shared) {
@@ -277,8 +291,7 @@ export class Picture {
         ...file,
         id,
         used_by: agents.length,
-        // A new agent runs on the first profile: it reads that profile's files and its project file.
-        ...(source.profile === first?.name ? { for_new_agents: true } : {}),
+        ...(this.forNewAgents(source) ? { for_new_agents: true } : {}),
       });
     }
     return {
@@ -456,6 +469,8 @@ export async function saveEdit(source: Source, edit: Pick<ContextEditFrame, "tex
 export interface Roster {
   readonly readers: readonly Reader[];
   readonly first: Profile | undefined;
+  /** Whether each new agent gets a profile of its own (Chips ADR 0241). */
+  readonly ownProfiles?: boolean | undefined;
 }
 
 /** Where the copies go: the SDK's `chips.settings`. */
@@ -482,9 +497,9 @@ export class Contexts {
   /** Every copy read again, and sent where it moved. */
   refresh(): Promise<void> {
     return this.inLine(async () => {
-      const { readers, first } = this.roster();
-      const picture = new Picture(readers, first, this.env);
-      await this.port.harness(picture.harnessCopy(first)).catch((error: unknown) => {
+      const { readers, first, ownProfiles } = this.roster();
+      const picture = new Picture(readers, first, this.env, ownProfiles);
+      await this.port.harness(picture.harnessCopy()).catch((error: unknown) => {
         this.log(`the harness's context not sent: ${messageOf(error)}`);
       });
       for (const { agentId } of readers) {
@@ -503,12 +518,12 @@ export class Contexts {
    */
   async edit(frame: ContextEditFrame): Promise<AgentContextCopy | HarnessContextCopy> {
     const answer = await this.inLine(async () => {
-      const { readers, first } = this.roster();
+      const { readers, first, ownProfiles } = this.roster();
       const copyNow = () => {
-        const picture = new Picture(readers, first, this.env);
-        return frame.agent_id === undefined ? picture.harnessCopy(first) : picture.agentCopy(frame.agent_id);
+        const picture = new Picture(readers, first, this.env, ownProfiles);
+        return frame.agent_id === undefined ? picture.harnessCopy() : picture.agentCopy(frame.agent_id);
       };
-      const found = new Picture(readers, first, this.env).find(frame.agent_id, frame.name);
+      const found = new Picture(readers, first, this.env, ownProfiles).find(frame.agent_id, frame.name);
       if (found === undefined) {
         throw new Refuse(`Hermes gives this agent no file called ${frame.name}.`, copyNow(), "failed");
       }
