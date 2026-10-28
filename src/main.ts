@@ -19,6 +19,10 @@
  * each model call to a webhook this adds to each profile's `config.yaml` (`hooks.ts`). It listens
  * for it on 127.0.0.1, on `hookPort` from the config, else the port it chose the first time.
  *
+ * Hermes's gateway, at a local address, is started with the bridge when nothing answers there, so
+ * the bridge kept running from login brings Hermes back after a reboot; and a person's Restart in
+ * Chips restarts it (Chips ADR 0094, `gateway.ts`).
+ *
  * `npm run keep` is the same, then keeps the bridge running from login (`keep.ts`).
  */
 
@@ -29,6 +33,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { checkGit, connect, fileStore, helloOnce, JoinError, join as joinChips, reportStep } from "@chipschat/harness";
 import { Bridge, type BridgeState, settingsFor, WANTS } from "./bridge.js";
+import { Gateways, gatewayLog, gatewaysOf, restarter, thisMachine } from "./gateway.js";
 import { HermesClient } from "./hermes.js";
 import { hermesRoot, profileHome } from "./home.js";
 import { hookPortIn } from "./hooks.js";
@@ -93,6 +98,18 @@ try {
 }
 const name = config.name ?? "Hermes";
 
+// Hermes's gateway, which the bridge starts when nothing answers and restarts when a person asks.
+const gateways = new Gateways({
+  gateways: gatewaysOf(config.agents),
+  root,
+  env: process.env,
+  system: thisMachine(),
+  log: (line) => log(`gateway: ${line}`),
+  logFile: gatewayLog(folder),
+});
+// Kept running from login, the bridge brings Hermes back with it. A link's check found it answering.
+if (link === undefined) await gateways.startIfDown();
+
 /** A link Chips refuses (spent, expired, not a link), said plainly: its words, no stack. */
 const refused = (error: unknown): never => {
   if (!(error instanceof JoinError)) throw error;
@@ -112,11 +129,22 @@ keepIfAsked(LABEL, joined.url, ["HERMES_HOME", ...config.agents.map((agent) => a
 
 // A person's edits from an agent's page reach the bridge once it is made.
 let bridge: Bridge | undefined;
+// A person's Restart (Chips ADR 0094): nothing said of Hermes until its gateway is back, or isn't.
+const restart = restarter({
+  restart: () => gateways.restart(),
+  hold: (held) => bridge?.hold(held),
+  say: async (trouble) => {
+    if (bridge !== undefined) return bridge.restarted(trouble);
+    await (trouble === undefined ? chips.reportOk() : chips.reportTrouble(trouble));
+  },
+  log: (line) => log(`gateway: ${line}`),
+});
 const chips = await connect({
   url: joined.url,
   token: joined.token,
   client: { name: "chips-hermes", version: "1.0.0" },
   store: fileStore(join(folder, "chips-state.json")),
+  onRestart: restart,
   settings: settingsFor(() => bridge),
 });
 

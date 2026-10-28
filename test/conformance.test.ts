@@ -1,8 +1,10 @@
 /**
  * The golden scenario of Chips's conformance kit, played against the bridge and a scripted Hermes
  * that asks before it acts: what `chips conformance custom --capabilities
- * agents,new_agents,context_files,context_windows` checks of it live. Hermes's own files are in a
- * temporary home, and the scripted Hermes says how full each session is through the webhook.
+ * agents,new_agents,context_files,context_windows,restarts` checks of it live. Hermes's own files
+ * are in a temporary home, and the scripted Hermes says how full each session is through the
+ * webhook. A restart here restarts nothing: what Restart does to Hermes's gateway is
+ * `gateway.test.ts`'s, on a machine of its own.
  */
 
 import { strict as assert } from "node:assert";
@@ -13,6 +15,7 @@ import { it } from "node:test";
 import { formatReport, runConformance } from "@chipschat/conformance";
 import { type Chips, connect } from "@chipschat/harness";
 import { Bridge, settingsFor } from "../src/bridge.ts";
+import { restarter } from "../src/gateway.ts";
 import { startFakeHermes } from "./fake-hermes.ts";
 
 it("passes the golden scenario", async () => {
@@ -28,9 +31,15 @@ it("passes the golden scenario", async () => {
       beatTimeoutMs: 3000,
       subject: {
         name: "chips-hermes",
-        capabilities: ["agents", "new_agents", "context_files", "context_windows"],
+        capabilities: ["agents", "new_agents", "context_files", "context_windows", "restarts"],
         start: async (address) => {
-          client = await connect({ url: address.url, token: address.token, settings: settingsFor(() => bridge) });
+          const onRestart = restarter({
+            restart: async () => undefined,
+            hold: (held) => bridge?.hold(held),
+            say: async (trouble) => bridge?.restarted(trouble),
+            log: () => undefined,
+          });
+          client = await connect({ url: address.url, token: address.token, settings: settingsFor(() => bridge), onRestart });
           bridge = new Bridge({
             chips: client,
             agents: [{ name: "Hermes", address: { url: hermes.url, key: hermes.key } }],
@@ -63,7 +72,7 @@ it("passes the golden scenario", async () => {
       [
         ["Talks", 1],
         ["Supervised", 1],
-        ["Lives in Chips", 2],
+        ["Lives in Chips", 3],
         ["Managed from Chips", 2],
       ],
     );

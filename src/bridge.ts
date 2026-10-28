@@ -105,10 +105,10 @@ export interface BridgeState {
 /**
  * What it asks to be allowed when it joins with a code: to speak for its agents (ADR 0087), to
  * make a new one a person asks for in a room (ADR 0108), to copy one (ADR 0087, Fork), and to show
- * each agent's context (ADR 0134) and context window (ADR 0146). A link carries what the person
- * chose instead.
+ * each agent's context (ADR 0134) and context window (ADR 0146), and to restart Hermes's gateway
+ * when a person asks (ADR 0094, `gateway.ts`). A link carries what the person chose instead.
  */
-export const WANTS: readonly string[] = ["agents", "new_agents", "forks", "context_files", "context_windows"];
+export const WANTS: readonly string[] = ["agents", "new_agents", "forks", "context_files", "context_windows", "restarts"];
 
 export interface BridgeOptions {
   readonly chips: Chips;
@@ -334,6 +334,10 @@ export class Bridge {
   /** The port Hermes's webhook reaches the bridge on, once it listens. */
   private fillsPort: number | undefined;
   private toldNoReadings = false;
+  /** While Hermes's gateway restarts (Chips ADR 0094), the health watch says nothing: the restart says how it went. */
+  private held = false;
+  /** What went wrong in the last restart, said in place of the watch's own words while Hermes doesn't answer. */
+  private why: string | undefined;
 
   constructor(private readonly options: BridgeOptions) {
     this.log = options.log ?? (() => undefined);
@@ -396,6 +400,22 @@ export class Bridge {
     this.health = setInterval(() => void this.sayHowItIs(), this.options.healthEveryMs ?? 30_000);
     this.health.unref();
     await this.startSettings();
+  }
+
+  /** Hold the health watch's words while Hermes's gateway restarts, and let them go after. */
+  hold(held: boolean): void {
+    this.held = held;
+  }
+
+  /**
+   * How a restart went (Chips ADR 0094): fine as the gateways now are, or its words, which stand
+   * while Hermes doesn't answer. The health watch speaks for itself again after.
+   */
+  async restarted(trouble: string | undefined): Promise<void> {
+    this.held = false;
+    this.why = trouble;
+    if (trouble === undefined) return this.sayHowItIs();
+    await this.options.chips.reportTrouble(trouble).catch(() => undefined);
   }
 
   stop(): void {
@@ -704,15 +724,18 @@ export class Bridge {
     }
   }
 
-  /** Trouble while a profile's gateway doesn't answer, and fine once all do (ADR 0083). */
+  /** Trouble while a profile's gateway doesn't answer, and fine once all do (ADR 0083); nothing while a restart runs. */
   private async sayHowItIs(): Promise<void> {
+    if (this.held) return;
     for (const agent of this.agents) agent.up = await agent.client.healthy();
+    if (this.held) return;
     const down = this.agents.filter((agent) => !agent.up);
+    if (down.length === 0) this.why = undefined;
     const chips = this.options.chips;
     const said =
       down.length === 0
         ? chips.reportOk()
-        : chips.reportTrouble(`Hermes isn't answering for ${down.map((agent) => agent.config.name).join(", ")}`);
+        : chips.reportTrouble(this.why ?? `Hermes isn't answering for ${down.map((agent) => agent.config.name).join(", ")}`);
     await said.catch(() => undefined);
   }
 

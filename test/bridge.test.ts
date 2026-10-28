@@ -923,4 +923,35 @@ describe("its health", () => {
     hermes.up = true;
     await until(() => chips.statuses().at(-1)?.state === "ok");
   });
+
+  it("says nothing while Hermes's gateway restarts, then how the restart went (Chips ADR 0094)", async () => {
+    const { chips, hermes, bridge } = await rig();
+    await until(() => chips.statuses().at(-1)?.state === "ok");
+    bridge.hold(true);
+    const before = chips.statuses().length;
+    hermes.up = false;
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    assert.equal(chips.statuses().length, before, "the watch is held");
+    // It failed: its words, which stand while Hermes doesn't answer, in place of the watch's own.
+    await bridge.restarted("Hermes's gateway started, but nothing answers on port 8642.");
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    assert.ok(chips.statuses().length > before + 1, "the watch speaks again");
+    assert.deepEqual(
+      [...new Set(chips.statuses().slice(before).map((status) => status.reason))],
+      ["Hermes's gateway started, but nothing answers on port 8642."],
+    );
+    hermes.up = true;
+    await until(() => chips.statuses().at(-1)?.state === "ok");
+    // Fine: said at once, as the gateways are.
+    bridge.hold(true);
+    const now = chips.statuses().length;
+    await bridge.restarted(undefined);
+    assert.equal(chips.statuses()[now]?.state, "ok");
+  });
+});
+
+describe("its Restart (Chips ADR 0094)", () => {
+  it("asks for restarts when it joins with a code", () => {
+    assert.ok(WANTS.includes("restarts"), "so Chips offers Restart on its page");
+  });
 });

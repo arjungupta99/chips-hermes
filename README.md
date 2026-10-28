@@ -29,6 +29,7 @@ Apache-2.0. Not published: a local repository until Chips's SDK is.
 | Stop | `POST …/stop` |
 | A steer, a follow-up, an interrupt | `POST …/steer`; the next run of the turn; stop, then the next run with the words |
 | Trouble on the harness | `GET /health` every 30 s, per profile |
+| Restart on its page (ADR 0094) | Hermes's gateway restarted on this machine, and Hermes shown as restarting until its API server answers again (below) |
 | Context (ADRs 0134, 0238) | the files Hermes builds the agent from: `SOUL.md` (who it is), `memories/USER.md` and `memories/MEMORY.md` in the profile's home, and the first project file with words in it in the folder Hermes's gateway works in (`.hermes.md`, `HERMES.md`, `AGENTS.md` and the rest Hermes looks for). The first profile's files and the project file are the harness's own set, since every new agent reads them; another profile's files are the agent's own until a fork reads them too. An edit is saved where Hermes reads it, only if the file is still the one the person changed. A memory file is saved as Hermes saves it, under its lock, entries apart by a line with only `§`, and an edit over Hermes's limit (2,200 and 1,375 characters unless `config.yaml` says others) is refused with how much to take out. The page says Hermes reads them when a conversation starts: a space already talking picks up a change after it next compacts |
 | Context window (ADR 0146) | how full the agent's session is, from the webhook below: the last model call's prompt tokens, of its model's window. A sharp drop in a session is a compaction, and a turn past half the window says its peak. Read only: the limit is the profile's `compression.threshold` (75% under 512K tokens unless set higher), and Hermes can't be asked to compact from Chips. Nothing is shown until Hermes's first reading |
 
@@ -121,8 +122,29 @@ writes a launch agent (`~/Library/LaunchAgents/chat.chips.hermes.plist`; a syste
 Linux) that runs the bridge from login and again whenever it stops, and ends: closing the terminal
 or restarting the machine no longer takes it offline in Chips. Its log is
 `~/Library/Logs/chips-hermes.log`. `npm run keep -- --stop` stops it and removes the file. Stop a
-copy started by hand first: two answer twice. Hermes's own `hermes gateway` is kept running its own
-way.
+copy started by hand first: two answer twice. When the bridge starts and nothing answers at a local
+address, it starts Hermes's gateway (below), so Hermes comes back after a reboot too.
+
+**Restart.** Restart on Hermes's page in Chips restarts Hermes's gateway, the process serving its
+API server at the agents' address, when that is on this machine:
+- Installed as Hermes's own service (`hermes gateway install`, so
+  `~/Library/LaunchAgents/ai.hermes.gateway.plist` or a systemd unit), `hermes gateway restart`.
+- Run by hand, the process listening on the API's port is stopped (SIGTERM, then SIGKILL if it is
+  still there 15 s later), only if it is this user's `hermes gateway run`. Anything else there is
+  left alone, and Chips says so. Then `hermes gateway run` is started again with the same words, in
+  the folder it worked in, in a session of its own, its output added to
+  `~/Library/Logs/chips-hermes-gateway.log`.
+
+Chips shows Hermes as restarting until its API server answers again, then fine, or in a line what
+went wrong. Started with the bridge, it is the same, with `hermes gateway start` for a service. The
+bridge asks for `restarts` when it joins with a code; a harness joined without it gets Restart
+once Chips is told it takes it (`chips declare`, ADR 0046).
+
+On a Mac whose Homebrew python@3.14 can't load macOS's expat, Hermes dies as it starts with
+`Symbol not found: _XML_SetAllocTrackerActivationThreshold`. Then the bridge starts Hermes's entry
+point (the one the `hermes` wrapper runs) directly, with the wrapper's variables and
+`DYLD_LIBRARY_PATH=/opt/homebrew/opt/expat/lib`, which macOS would drop at the wrapper, and its log
+says so.
 
 **Folders.** Each agent gets a folder of its own, `~/chips-hermes/agents/<its name>`, made the
 first time it is spoken to and kept by its Chips agent after a rename. Each run tells the agent it

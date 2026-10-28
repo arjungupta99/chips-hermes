@@ -198,7 +198,11 @@ function folderOfPid(raw: string): string | undefined {
   } catch {
     return undefined;
   }
-  if (pid === undefined) return undefined;
+  return pid === undefined ? undefined : processFolder(pid);
+}
+
+/** The folder a process works in: from `/proc` on Linux, `lsof` on a Mac. Nothing when it can't be read. */
+export function processFolder(pid: number): string | undefined {
   try {
     if (process.platform === "linux") return readlinkSync(`/proc/${pid}/cwd`);
     const out = execFileSync("lsof", ["-a", "-p", String(pid), "-d", "cwd", "-Fn"], {
