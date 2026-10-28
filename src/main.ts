@@ -14,16 +14,26 @@
  * the config: the SDK's state (cursor, unanswered events, runs not ended) and which session each
  * room is.
  *
+ * Each agent's page in Chips shows its context: the files Hermes builds it from, read under
+ * `$HERMES_HOME` (else `~/.hermes`), and how full its context window is, which Hermes sends after
+ * each model call to a webhook this adds to each profile's `config.yaml` (`hooks.ts`). It listens
+ * for it on 127.0.0.1, on `hookPort` from the config, else the port it chose the first time.
+ *
  * `npm run keep` is the same, then keeps the bridge running from login (`keep.ts`).
  */
 
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { createServer } from "node:net";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { checkGit, connect, fileStore, helloOnce, JoinError, join as joinChips, reportStep } from "@chipschat/harness";
-import { Bridge, type BridgeState, WANTS } from "./bridge.js";
+import { Bridge, type BridgeState, settingsFor, WANTS } from "./bridge.js";
+import { HermesClient } from "./hermes.js";
+import { hermesRoot, profileHome } from "./home.js";
+import { hookPortIn } from "./hooks.js";
 import { keepIfAsked, stopIfAsked, words } from "./keep.js";
-import { type Config, checkedWords, checkHermes, readConfig, SetupError } from "./setup.js";
+import { type Config, checkedWords, checkHermes, readConfig, readyHooks, SetupError } from "./setup.js";
 
 const home = (path: string) => (path.startsWith("~/") ? join(homedir(), path.slice(2)) : path);
 const link = process.env["CHIPS_JOIN_LINK"] || undefined;
@@ -33,14 +43,47 @@ stopIfAsked(LABEL);
 const configPath = resolve(home(words[0] ?? "~/.chips-hermes/config.json"));
 // What it needs, checked before a link is taken up, which works once. Started without a link, a
 // bridge up before Hermes waits for it, and says so in Chips meanwhile.
+const folder = dirname(configPath);
+const statePath = join(folder, "sessions.json");
+const state: BridgeState = existsSync(statePath)
+  ? (JSON.parse(readFileSync(statePath, "utf8")) as BridgeState)
+  : { sessions: {} };
+const saveState = (next: BridgeState) => {
+  mkdirSync(folder, { recursive: true, mode: 0o700 });
+  writeFileSync(statePath, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });
+};
+const log = (line: string) => process.stdout.write(`${new Date().toISOString()} ${line}\n`);
+
+/** A port nothing listens on now, for Hermes's webhook the first time. */
+const freePort = () =>
+  new Promise<number>((done, failed) => {
+    const server = createServer();
+    server.once("error", failed);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      server.close(() => done(typeof address === "object" && address !== null ? address.port : 0));
+    });
+  });
+
 let config: Config;
+// Hermes's webhook, which says how full each agent's context is: where it reaches the bridge, and its secret.
+const root = hermesRoot();
+const fills = (state.fills ??= {});
 try {
   config = readConfig(configPath);
   if (link !== undefined) {
     reportStep("checking", { detail: "Looking for its API server" });
     await checkHermes(config);
-    reportStep("checked", { detail: checkedWords(config) });
   }
+  fills.secret ??= randomBytes(32).toString("hex");
+  fills.port =
+    config.hookPort ?? fills.port ?? hookPortIn(profileHome(root, config.agents[0]?.address.profile)) ?? (await freePort());
+  saveState(state);
+  const first = config.agents[0];
+  const gatewayUp = link !== undefined || (first !== undefined && (await new HermesClient(first.address).healthy()));
+  const hooks = readyHooks(config, { root, port: fills.port, secret: fills.secret, gatewayUp });
+  for (const line of hooks.lines) log(line);
+  if (link !== undefined) reportStep("checked", { detail: checkedWords(config, hooks.restart) });
 } catch (error) {
   if (!(error instanceof SetupError)) throw error;
   // Where it stopped, in a few words for Chips for Mac's sheet; the whole sentence for a terminal.
@@ -49,9 +92,6 @@ try {
   process.exit(1);
 }
 const name = config.name ?? "Hermes";
-const folder = dirname(configPath);
-const statePath = join(folder, "sessions.json");
-const log = (line: string) => process.stdout.write(`${new Date().toISOString()} ${line}\n`);
 
 /** A link Chips refuses (spent, expired, not a link), said plainly: its words, no stack. */
 const refused = (error: unknown): never => {
@@ -70,30 +110,31 @@ const joined = await joinChips({
 // Joined, `npm run keep` hands over to a copy kept running, which says the hello.
 keepIfAsked(LABEL, joined.url, ["HERMES_HOME", ...config.agents.map((agent) => agent.keyEnv ?? "API_SERVER_KEY")], log);
 
-const state: BridgeState = existsSync(statePath)
-  ? (JSON.parse(readFileSync(statePath, "utf8")) as BridgeState)
-  : { sessions: {} };
-
+// A person's edits from an agent's page reach the bridge once it is made.
+let bridge: Bridge | undefined;
 const chips = await connect({
   url: joined.url,
   token: joined.token,
   client: { name: "chips-hermes", version: "1.0.0" },
   store: fileStore(join(folder, "chips-state.json")),
+  settings: settingsFor(() => bridge),
 });
 
 // Each agent works on its room's project in a copy of its own (Chips ADR 0221), where git will.
 const git = await checkGit();
 if (!git.ok) log(`rooms' projects are off: ${git.why}`);
 
-const bridge = new Bridge({
+bridge = new Bridge({
   folders: config.folders,
   projects: git.ok,
   chips,
   agents: config.agents,
   home: joined.spaceId,
   state,
-  saveState: (next) => writeFileSync(statePath, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 }),
+  saveState,
   log,
+  hermesRoot: root,
+  fills: { port: fills.port, secret: fills.secret },
 });
 await bridge.start();
 log(`answering for ${config.agents.map((agent) => agent.name).join(", ")} through Hermes`);
@@ -111,7 +152,7 @@ await helloOnce(joined, {
 
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.on(signal, () => {
-    bridge.stop();
+    bridge?.stop();
     chips.close();
     process.exit(0);
   });

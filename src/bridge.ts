@@ -22,17 +22,34 @@
  * in Hermes: the copy remembers everything the agent did, and from then on the two go on apart. It
  * answers through its original's profile and works in its original's folder.
  *
+ * An agent's page in Chips shows its context (Chips ADR 0134): the files Hermes builds it from,
+ * which a person may edit there (`context.ts`). It shows its context window too (Chips ADR 0146):
+ * how full its session is, as Hermes says after each model call through the webhook the bridge
+ * adds to its config (`fills.ts`, `hooks.ts`).
+ *
  * Hermes can't be told anything outside a run, and keeps no schedule this bridge reads yet, so
  * neither is claimed.
  */
 
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
-import type { Agent, Chips, Decision, Project, Run, Speaker } from "@chipschat/harness";
-import { heldNote, promptFor, pushedInWords, sendAnswer, sendingFiles } from "@chipschat/harness";
+import type {
+  Agent,
+  AgentContextCopy,
+  AgentContextWindowCopy,
+  Chips,
+  Decision,
+  HarnessContextCopy,
+  Project,
+  Run,
+  SettingsHandlers,
+  Speaker,
+} from "@chipschat/harness";
+import { heldNote, promptFor, pushedInWords, Refuse, sendAnswer, sendingFiles } from "@chipschat/harness";
 import {
   type AgentAsked,
   type AgentFork,
+  type ContextEditFrame,
   createIdGenerator,
   FORK_WAIT_MS,
   type Feedback,
@@ -40,8 +57,14 @@ import {
   messageIdOf,
   type ProjectFacts,
   type StepKind,
+  type WindowChangeFrame,
+  type WindowCompactFrame,
 } from "@chipschat/protocol";
+import { Contexts, type Profile, type Reader } from "./context.js";
+import { Fills, type KeptFills, WHY_NOT, whyReadOnly } from "./fills.js";
 import { HermesClient, HermesError, type ProfileAddress, type RunEvent, TERMINAL } from "./hermes.js";
+import { envValue, profileHome, profileName } from "./home.js";
+import { hookUrl, SECRET_ENV } from "./hooks.js";
 
 export interface AgentConfig {
   /** What a person sees, and its @handle: `Hermes`. */
@@ -75,14 +98,17 @@ export interface BridgeState {
    * has the copy's session (Chips ADR 0087, Fork).
    */
   profiles?: Record<string, string>;
+  /** Each agent's last context window reading, and the port and secret Hermes's webhook uses. */
+  fills?: KeptFills;
 }
 
 /**
  * What it asks to be allowed when it joins with a code: to speak for its agents (ADR 0087), to
- * make a new one a person asks for in a room (ADR 0108), and to copy one (ADR 0087, Fork). A link
- * carries what the person chose instead.
+ * make a new one a person asks for in a room (ADR 0108), to copy one (ADR 0087, Fork), and to show
+ * each agent's context (ADR 0134) and context window (ADR 0146). A link carries what the person
+ * chose instead.
  */
-export const WANTS: readonly string[] = ["agents", "new_agents", "forks"];
+export const WANTS: readonly string[] = ["agents", "new_agents", "forks", "context_files", "context_windows"];
 
 export interface BridgeOptions {
   readonly chips: Chips;
@@ -107,6 +133,42 @@ export interface BridgeOptions {
   readonly log?: ((line: string) => void) | undefined;
   /** How often each gateway is asked whether it is up. */
   readonly healthEveryMs?: number | undefined;
+  /**
+   * Hermes's root (`$HERMES_HOME`, else `~/.hermes`), where each profile's files are: what the
+   * agents' context is read from. None, and no context is sent.
+   */
+  readonly hermesRoot?: string | undefined;
+  /** How often the context files are read again, besides after each turn. */
+  readonly contextEveryMs?: number | undefined;
+  /**
+   * Where Hermes's webhook reaches the bridge, for the context window: a port on 127.0.0.1 (0
+   * for one of its own, kept), and the secret it signs with where a profile's `.env` doesn't
+   * say. None, and no context window is sent.
+   */
+  readonly fills?: { readonly port: number; readonly secret?: string | undefined } | undefined;
+  /** How often one agent's context window is sent at most while readings come fast. */
+  readonly fillsEveryMs?: number | undefined;
+  /** The environment a profile's working folder may be named in (`TERMINAL_CWD`). */
+  readonly env?: NodeJS.ProcessEnv | undefined;
+}
+
+/**
+ * The handlers `connect({ settings })` takes for this bridge, made before the bridge is: each asks
+ * the bridge `active` gives, once there is one.
+ */
+export function settingsFor(active: () => Bridge | undefined): SettingsHandlers {
+  const bridge = (): Bridge => {
+    const there = active();
+    if (there === undefined) throw new Refuse("The bridge is starting. Try again in a moment.");
+    return there;
+  };
+  return {
+    context: (edit) => bridge().onContextEdit(edit),
+    contextWindows: {
+      compact: async (ask) => bridge().onWindowCompact(ask),
+      change: async (ask) => bridge().onWindowChange(ask),
+    },
+  };
 }
 
 /**
@@ -262,9 +324,45 @@ export class Bridge {
   private copying: Promise<void> = Promise.resolve();
   private readonly log: (line: string) => void;
   private health: ReturnType<typeof setInterval> | undefined;
+  /** The harness's agents in Chips as last listed: whose context and window copies are sent. */
+  private listed: Agent[] = [];
+  /** The agents' context files (Chips ADR 0134), when the bridge knows where Hermes keeps them. */
+  private readonly contexts: Contexts | undefined;
+  private contextTimer: ReturnType<typeof setInterval> | undefined;
+  /** The agents' context windows (Chips ADR 0146), when Hermes's webhook has somewhere to reach. */
+  private readonly fills: Fills | undefined;
+  /** The port Hermes's webhook reaches the bridge on, once it listens. */
+  private fillsPort: number | undefined;
+  private toldNoReadings = false;
 
   constructor(private readonly options: BridgeOptions) {
     this.log = options.log ?? (() => undefined);
+    const { chips, hermesRoot } = options;
+    if (hermesRoot === undefined) return;
+    this.contexts = new Contexts(
+      () => this.roster(),
+      {
+        agent: (agentId, copy) => chips.settings.context(agentId, copy),
+        harness: (copy) => chips.settings.harnessContext(copy),
+      },
+      (line) => this.log(`context: ${line}`),
+      options.env ?? process.env,
+    );
+    if (options.fills === undefined) return;
+    const kept = (options.state.fills ??= {});
+    this.fills = new Fills({
+      whose: (sessionId) => this.whoseSession(sessionId),
+      profileOf: (agentId) => {
+        const profile = this.profileFor(agentId);
+        return profile === undefined ? undefined : { profile: profile.name, home: profile.home };
+      },
+      secretFor: (profile) => envValue(profileHome(hermesRoot, profile), SECRET_ENV) ?? kept.secret ?? options.fills?.secret,
+      send: (agentId, copy) => chips.settings.contextWindow(agentId, copy),
+      kept,
+      save: () => options.saveState(options.state),
+      log: (line) => this.log(`context window: ${line}`),
+      sendEveryMs: options.fillsEveryMs,
+    });
   }
 
   /** Register the agents, start hearing what is said to them, and say how their gateways are. */
@@ -291,13 +389,130 @@ export class Bridge {
     chips.on("feedback", (feedback) => {
       this.notRight(feedback).catch((error: unknown) => this.log(`a note on a reply went wrong: ${messageOf(error)}`));
     });
+    // An agent put in a room or taken out may be one made, archived or deleted: who reads what moves.
+    chips.on("agent.attached", () => void this.agentsMoved());
+    chips.on("agent.released", () => void this.agentsMoved());
     await this.sayHowItIs();
     this.health = setInterval(() => void this.sayHowItIs(), this.options.healthEveryMs ?? 30_000);
     this.health.unref();
+    await this.startSettings();
   }
 
   stop(): void {
     if (this.health !== undefined) clearInterval(this.health);
+    if (this.contextTimer !== undefined) clearInterval(this.contextTimer);
+    void this.fills?.close();
+  }
+
+  // ------------------------------------------------------------------ an agent's page
+
+  /**
+   * The agents' context and context windows, sent at start and kept current: the files read
+   * again every so often and after each turn, a window copy on each reading Hermes sends.
+   */
+  private async startSettings(): Promise<void> {
+    if (this.contexts === undefined) return;
+    this.listed = await this.options.chips.agents.list().catch(() => this.listed);
+    await this.contexts.refresh();
+    this.contextTimer = setInterval(() => void this.contexts?.refresh(), this.options.contextEveryMs ?? 15_000);
+    this.contextTimer.unref();
+    const fills = this.fills;
+    const asked = this.options.fills;
+    if (fills === undefined || asked === undefined) return;
+    const kept = (this.options.state.fills ??= {});
+    try {
+      this.fillsPort = await fills.listen(asked.port);
+      if (kept.port !== this.fillsPort) {
+        kept.port = this.fillsPort;
+        this.options.saveState(this.options.state);
+      }
+    } catch (error) {
+      this.log(`context window: nothing can listen on port ${asked.port} (${messageOf(error)}), so Chips won't show how full each agent's context is`);
+    }
+    await fills.sendAll();
+  }
+
+  /** The address Hermes's webhook POSTs a profile's readings to, once the bridge listens. */
+  hookUrl(profile = "default"): string | undefined {
+    return this.fillsPort === undefined ? undefined : hookUrl(this.fillsPort, profileName(profile));
+  }
+
+  /** The harness's agents listed again, the copies of any gone forgotten, and the context sent. */
+  private async agentsMoved(): Promise<void> {
+    if (this.contexts === undefined) return;
+    const before = this.listed;
+    this.listed = await this.options.chips.agents.list().catch(() => this.listed);
+    const now = new Set(this.active().map((agent) => agent.agentId));
+    for (const gone of before) {
+      if (now.has(gone.agentId)) continue;
+      this.options.chips.settings.forget(gone.agentId);
+      this.fills?.forget(gone.agentId);
+    }
+    await this.contexts.refresh();
+  }
+
+  /** The harness's agents that read anything now: the active ones listed. */
+  private active(): Agent[] {
+    return this.listed.filter((agent) => agent.state === "active");
+  }
+
+  /** A profile as the context needs it: its name and its home under Hermes's root. */
+  private profileOfRunning(agent: Running): Profile | undefined {
+    const root = this.options.hermesRoot;
+    if (root === undefined) return undefined;
+    return { name: profileName(agent.config.address.profile), home: profileHome(root, agent.config.address.profile) };
+  }
+
+  /** The profile an agent runs on: its own, a copy's original's, else the first (as `profileOf` picks). */
+  private profileFor(agentId: string): Profile | undefined {
+    const own = this.agents.find((agent) => agent.agentId === agentId);
+    const copied = this.options.state.profiles?.[agentId];
+    const original = this.agents.find((agent) => copied !== undefined && agent.key === copied);
+    const running = own ?? original ?? this.agents[0];
+    return running === undefined ? undefined : this.profileOfRunning(running);
+  }
+
+  /** Who reads what: each active agent with its profile, and the first profile, which new agents run on. */
+  private roster(): { readers: Reader[]; first: Profile | undefined } {
+    const readers: Reader[] = [];
+    const ids = new Set([...this.active().map((agent) => agent.agentId), ...this.agents.map((agent) => agent.agentId)]);
+    for (const agentId of ids) {
+      if (this.listed.some((agent) => agent.agentId === agentId && agent.state !== "active")) continue;
+      const profile = this.profileFor(agentId);
+      if (profile !== undefined) readers.push({ agentId, profile });
+    }
+    const first = this.agents[0];
+    return { readers, first: first === undefined ? undefined : this.profileOfRunning(first) };
+  }
+
+  /** The agent a Hermes session the bridge keeps is, with its profile: nothing for any other. */
+  private whoseSession(sessionId: string): { agentId: string; profile: string; home: string } | undefined {
+    const entry = Object.entries(this.options.state.sessions).find(([, session]) => session === sessionId);
+    if (entry === undefined) return undefined;
+    const who = entry[0].slice(0, entry[0].lastIndexOf("|"));
+    const agentId = this.agents.find((agent) => agent.key === who)?.agentId ?? who;
+    const profile = this.profileFor(agentId);
+    return profile === undefined ? undefined : { agentId, profile: profile.name, home: profile.home };
+  }
+
+  /** A person's edit of a context file from Chips (Chips ADR 0134), saved and answered. */
+  async onContextEdit(frame: ContextEditFrame): Promise<AgentContextCopy | HarnessContextCopy> {
+    if (this.contexts === undefined) throw new Refuse("This bridge reads no context files.");
+    if (frame.agent_id !== undefined && !this.listed.some((agent) => agent.agentId === frame.agent_id)) {
+      this.listed = await this.options.chips.agents.list().catch(() => this.listed);
+    }
+    return this.contexts.edit(frame);
+  }
+
+  /** A person's Compact now (Chips ADR 0146): Hermes can't be asked to compact from outside a run. */
+  onWindowCompact(frame: WindowCompactFrame): AgentContextWindowCopy {
+    throw new Refuse(WHY_NOT, this.fills?.copyOf(frame.agent_id));
+  }
+
+  /** A person's limit (Chips ADR 0146): Hermes sets it in its profile's config, for all its agents. */
+  onWindowChange(frame: WindowChangeFrame): AgentContextWindowCopy {
+    const profile = this.profileFor(frame.agent_id);
+    throw new Refuse(whyReadOnly(profile?.name ?? "default"), this.fills?.copyOf(frame.agent_id));
   }
 
   /** The Main agent, the first registered, once started: who says the harness's first words. */
@@ -357,6 +572,7 @@ export class Bridge {
     this.ours.add(agent.agentId);
     this.names.set(agent.agentId, agent.name);
     this.log(`${agent.name} made${agent.attached === false ? `, not in the room: ${agent.why ?? "too late"}` : ""}`);
+    void this.agentsMoved();
   }
 
   /**
@@ -409,6 +625,7 @@ export class Bridge {
     this.names.set(copy.agentId, copy.name);
     const away = copy.attached === false && !copy.spaces.includes(spaceId);
     this.log(`${copy.name}, a copy of ${name}, made${away ? `, not in the room: ${copy.why ?? "too late"}` : ""}`);
+    void this.agentsMoved();
   }
 
   /** An agent's name, from Chips's list when it isn't known yet. */
@@ -603,6 +820,8 @@ export class Bridge {
       this.log(`a turn of ${room.agent.config.name} went wrong: ${messageOf(error)}`);
     } finally {
       room.busy = false;
+      // A turn may have changed what the agent is built from (its memory): the copies are read again.
+      void this.contexts?.refresh();
       void this.pump(room);
     }
   }
@@ -916,6 +1135,24 @@ export class Bridge {
     const summary = said === "" ? "Done." : said.length <= 2000 ? said : `${said.slice(0, 1990)}…`;
     await run.complete({ summary });
     this.log(`${agent.config.name} answered in ${run.spaceId}`);
+    this.missingReadings();
+  }
+
+  /**
+   * A turn ended and Hermes sent no reading at all since the bridge started: its gateway most
+   * likely started before Chips's webhook was in its config. Said once, a little after, since a
+   * reading comes a moment after its model call.
+   */
+  private missingReadings(): void {
+    if (this.fills === undefined || this.fillsPort === undefined || this.fills.anyHeard || this.toldNoReadings) return;
+    this.toldNoReadings = true;
+    setTimeout(() => {
+      if (this.fills?.anyHeard === false) {
+        this.log(
+          "context window: Hermes sent no reading after a turn. Start hermes gateway again once, so it takes Chips's webhook from its config.",
+        );
+      }
+    }, 10_000).unref();
   }
 
   /** A run that failed, was stopped or was cut short in Hermes. */

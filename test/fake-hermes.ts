@@ -17,8 +17,14 @@
  *
  * With `askFirst`, every run asks before it answers, as the golden scenario needs. With `usage`, a
  * run's end says it counted that, in place of Hermes 0.22.0's counts.
+ *
+ * With `hook` set, it says how full the session is as Hermes's outbound webhook does after each
+ * model call (`post_api_request`), signed, before the run's events: the prompt tokens in `fills`
+ * when a test sets them (one call each), else one call that grows with the session. With `review`
+ * set, a memory review follows, as Hermes runs one: the session's id, a task of its own.
  */
 
+import { createHmac, randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 
@@ -35,6 +41,9 @@ interface FakeRun {
   drop?: boolean;
   /** The session it is in, where its words and answer are kept. */
   session?: string;
+  /** The session it was asked for, and the profile it ran on. */
+  named?: string;
+  profile?: string;
 }
 
 export interface Started {
@@ -72,6 +81,16 @@ export interface FakeHermes {
   up: boolean;
   /** The session compressed: it goes on under a new id with what it held. The new id. */
   compress(sessionId: string): string;
+  /** Where Hermes's outbound webhook POSTs each profile's readings, and what it signs them with. */
+  hook?: { readonly url: (profile: string) => string | undefined; readonly secret: string } | undefined;
+  /** The next run's model calls, each its prompt tokens; taken by that run. */
+  fills?: number[] | undefined;
+  /** The model's window, as Hermes's compressor says it. */
+  window: number;
+  /** A memory review after the next run, with these prompt tokens. */
+  review?: number | undefined;
+  /** The deliveries the webhook made, and how each was answered. */
+  readonly delivered: { readonly status: number; readonly body: Record<string, unknown> }[];
   close(): Promise<void>;
 }
 
@@ -104,6 +123,8 @@ export async function startFakeHermes(
     forks: [],
     ended: new Map(),
     up: true,
+    window: 200_000,
+    delivered: [],
     compress: (sessionId) => {
       const from = latestOf(sessionId);
       const next = `${from}~`;
@@ -143,8 +164,75 @@ export async function startFakeHermes(
     cache_write_tokens: 200,
   };
 
+  /** One model call's reading, POSTed as Hermes's outbound webhook does, signed. */
+  const deliver = async (profile: string, sessionId: string, task: string, turn: string, call: number, prompt: number) => {
+    const hook = fake.hook;
+    const url = hook?.url(profile);
+    if (hook === undefined || url === undefined) return;
+    const now = Date.now() / 1000;
+    const body = JSON.stringify({
+      hook_event_name: "post_api_request",
+      profile,
+      tool_name: null,
+      tool_input: null,
+      session_id: sessionId,
+      cwd: "/tmp",
+      extra: {
+        task_id: task,
+        turn_id: turn,
+        api_request_id: `${turn}:api:${call}`,
+        platform: "api_server",
+        model: "heron-2",
+        provider: "fake",
+        api_call_count: call,
+        started_at: now - 1,
+        ended_at: now,
+        finish_reason: "stop",
+        message_count: call + 1,
+        // The words come with the numbers: the bridge keeps only the numbers.
+        response: { choices: [{ message: { content: "Here is the answer." } }] },
+        usage: {
+          input_tokens: prompt - 900,
+          output_tokens: 40,
+          cache_read_tokens: 900,
+          cache_write_tokens: 0,
+          reasoning_tokens: 0,
+          request_count: 1,
+          prompt_tokens: prompt,
+          total_tokens: prompt + 40,
+        },
+        context_length: fake.window,
+        assistant_message: "Here is the answer.",
+      },
+      delivery_id: randomUUID().replace(/-/g, ""),
+      timestamp: new Date().toISOString(),
+    });
+    const signature = createHmac("sha256", hook.secret).update(body).digest("hex");
+    const answer = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-hermes-signature-256": `sha256=${signature}` },
+      body,
+    }).catch(() => undefined);
+    fake.delivered.push({ status: answer?.status ?? 0, body: JSON.parse(body) as Record<string, unknown> });
+  };
+
+  /** The run's model calls, said to the webhook before its events, and a memory review after when asked. */
+  const readings = async (run: FakeRun, profile: string, named: string | undefined) => {
+    const session = run.session ?? named ?? "";
+    // As Hermes's API server: the run's task is the session it was asked for.
+    const task = named ?? run.id;
+    const turn = `${session}:${task}:${run.id}`;
+    const fills = fake.fills ?? [2000 + 500 * (histories.get(session)?.length ?? 0)];
+    fake.fills = undefined;
+    for (const [at, prompt] of fills.entries()) await deliver(profile, session, task, turn, at + 1, prompt);
+    const review = fake.review;
+    fake.review = undefined;
+    if (review !== undefined) await deliver(profile, session, randomUUID(), `${session}:review`, 1, review);
+  };
+
   const play = async (run: FakeRun) => {
     await sleep(20);
+    await readings(run, run.profile ?? "default", run.named);
     // Before the words are read: the fix turn's last line asks the agent to "ask them" when unsure.
     if (run.input.includes("says your reply in this space wasn't right.")) {
       const output = "Sunday it is: I moved the plan to Sunday, your flight home.";
@@ -296,6 +384,8 @@ export async function startFakeHermes(
         // A run naming a compressed session goes on in its latest, as Hermes's `/v1/runs` does.
         const named = typeof body["session_id"] === "string" ? body["session_id"] : undefined;
         if (named !== undefined) run.session = latestOf(named);
+        if (named !== undefined) run.named = named;
+        run.profile = profile;
         const history = run.session === undefined ? [] : (histories.get(run.session) ?? []);
         if (run.session !== undefined) histories.set(run.session, [...history, run.input]);
         fake.started.push({

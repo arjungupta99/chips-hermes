@@ -7,16 +7,20 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { filledIn, type StopWords } from "@chipschat/harness";
 import type { AgentConfig } from "./bridge.js";
 import { HermesClient } from "./hermes.js";
+import { profileHome, profileName } from "./home.js";
+import { addHook, type HookOutcome } from "./hooks.js";
 
 export interface Config {
   readonly name?: string;
   readonly agents: readonly AgentConfig[];
   /** Where each agent gets a folder of its own, unless the config names one `folder` for them all. */
   readonly folders: string;
+  /** The port Hermes's webhook reaches the bridge on, when the config fixes one. */
+  readonly hookPort?: number;
 }
 
 /**
@@ -42,13 +46,58 @@ const portOf = (url: string) => {
   return parsed.port || (parsed.protocol === "https:" ? "443" : "80");
 };
 
-/** What the check found, under its step on the sheet. */
-export function checkedWords(config: Config): string {
+/** What the check found, under its step on the sheet, and the one restart Chips's webhook needs. */
+export function checkedWords(config: Config, restart = false): string {
   const urls = new Set(config.agents.map((agent) => agent.address.url));
   const [url] = urls;
-  return urls.size === 1 && url !== undefined
-    ? `Its API server answers on port ${portOf(url)}`
-    : `Its API server answers for each of ${config.agents.length} agents`;
+  const found =
+    urls.size === 1 && url !== undefined
+      ? `Its API server answers on port ${portOf(url)}`
+      : `Its API server answers for each of ${config.agents.length} agents`;
+  return restart ? `${found}. ${RESTART}` : found;
+}
+
+/** What a webhook added while Hermes's gateway runs needs: it reads its hooks when it starts. */
+export const RESTART = "Start hermes gateway again once, so it tells Chips how full each agent's context is.";
+
+/**
+ * Chips's webhook in the config of each profile the agents run on (`hooks.ts`), so Hermes says
+ * how full each agent's context is, and what a person has to do for it, in lines for the log:
+ * a restart of `hermes gateway` once when one was added while it runs, or lines to add by hand to
+ * a config the bridge won't change. Nothing stops for it: the bridge works without it.
+ */
+export function readyHooks(
+  config: Config,
+  options: { readonly root: string; readonly port: number; readonly secret: string; readonly gatewayUp: boolean },
+): { readonly lines: string[]; readonly restart: boolean } {
+  const lines: string[] = [];
+  let restart = false;
+  const done = new Set<string>();
+  for (const agent of config.agents) {
+    const profile = profileName(agent.address.profile);
+    if (done.has(profile)) continue;
+    done.add(profile);
+    const home = profileHome(options.root, agent.address.profile);
+    let outcome: HookOutcome;
+    try {
+      outcome = addHook(home, options.port, profile, options.secret);
+    } catch (error) {
+      lines.push(`Chips's webhook wasn't added to ${shown(join(home, "config.yaml"))}: ${error instanceof Error ? error.message : String(error)}`);
+      continue;
+    }
+    if (outcome.state === "added") {
+      lines.push(`Added Chips's webhook to ${shown(outcome.path)}, so Hermes tells Chips how full each agent's context is.`);
+      restart ||= options.gatewayUp;
+    } else if (outcome.state === "by_hand") {
+      lines.push(
+        `${shown(outcome.path)} was left as it is: ${outcome.why}. For Chips to show how full each agent's context is, add these lines to it, then start hermes gateway again:\n${outcome.lines}`,
+      );
+    } else if (outcome.state === "no_home") {
+      lines.push(`Hermes has no ${profile} profile at ${shown(home)}, so no webhook was added for it.`);
+    }
+  }
+  if (restart) lines.push(RESTART);
+  return { lines, restart };
 }
 
 export const STILL_GOOD = "The link is still good: run the same command again once that's done.";
@@ -125,10 +174,12 @@ export function readConfig(path: string, env: NodeJS.ProcessEnv = process.env): 
       ...(own === undefined ? {} : { folder: own }),
     };
   });
+  const hookPort = (raw as { hookPort?: unknown }).hookPort;
   return {
     ...(typeof raw.name === "string" ? { name: raw.name } : {}),
     agents,
     folders: folderOf(raw.folders) ?? resolve(homedir(), "chips-hermes", "agents"),
+    ...(typeof hookPort === "number" && Number.isInteger(hookPort) && hookPort > 0 && hookPort < 65536 ? { hookPort } : {}),
   };
 }
 

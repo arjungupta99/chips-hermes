@@ -29,13 +29,37 @@ Apache-2.0. Not published: a local repository until Chips's SDK is.
 | Stop | `POST …/stop` |
 | A steer, a follow-up, an interrupt | `POST …/steer`; the next run of the turn; stop, then the next run with the words |
 | Trouble on the harness | `GET /health` every 30 s, per profile |
+| Context (ADRs 0134, 0238) | the files Hermes builds the agent from: `SOUL.md` (who it is), `memories/USER.md` and `memories/MEMORY.md` in the profile's home, and the first project file with words in it in the folder Hermes's gateway works in (`.hermes.md`, `HERMES.md`, `AGENTS.md` and the rest Hermes looks for). The first profile's files and the project file are the harness's own set, since every new agent reads them; another profile's files are the agent's own until a fork reads them too. An edit is saved where Hermes reads it, only if the file is still the one the person changed. A memory file is saved as Hermes saves it, under its lock, entries apart by a line with only `§`, and an edit over Hermes's limit (2,200 and 1,375 characters unless `config.yaml` says others) is refused with how much to take out. The page says Hermes reads them when a conversation starts: a space already talking picks up a change after it next compacts |
+| Context window (ADR 0146) | how full the agent's session is, from the webhook below: the last model call's prompt tokens, of its model's window. A sharp drop in a session is a compaction, and a turn past half the window says its peak. Read only: the limit is the profile's `compression.threshold` (75% under 512K tokens unless set higher), and Hermes can't be asked to compact from Chips. Nothing is shown until Hermes's first reading |
 
 Not yet:
 - Hermes's clarify questions (their event isn't documented).
 - Its cron jobs as Chips schedules (ADR 0157).
 - Its model list as the agent's Model group.
-- Context files.
-- A context gauge (Hermes reports no window during a run).
+
+**How full each context is: Hermes's webhook.** Hermes's API server reports no window during a
+run, so the bridge adds an outbound webhook to each profile's `config.yaml` when it starts (and
+in the check before a link is taken up):
+
+```yaml
+hooks:
+  outbound:
+    - name: chips
+      url: http://127.0.0.1:<port>/chips-hermes/default
+      events: [post_api_request]
+      secret_env: CHIPS_HOOK_SECRET
+      timeout: 5
+```
+
+It only ever adds: with no `hooks:` it appends this block, and under a `hooks:` with no
+`outbound:` yet it puts `outbound:` first. Anything else it leaves as it is, and its log says the
+lines to add. The secret goes in the profile's `.env`, which Hermes loads into its gateway; a
+profile with no `.env` gets the secret in the entry instead. Hermes reads its hooks when its
+gateway starts, so after the bridge adds one, start `hermes gateway` again once (the setup step
+says so when the gateway was running). After every model call Hermes then POSTs the call's
+numbers, signed, to the bridge on 127.0.0.1. Hermes sends the reply's words too: the bridge
+checks the signature, keeps only the numbers, and drops the rest. The port is chosen the first
+time and kept; `hookPort` in the config fixes one.
 
 **Approvals and Hermes v0.20.6.** Hermes's API server counts itself as unattended (issue
 [#98728](https://github.com/NousResearch/hermes-agent/issues/98728), open on 14 October 2026). So a
@@ -122,8 +146,9 @@ npm test
 ```
 
 They run the bridge against Chips's conformance fake and a scripted Hermes API server
-(`test/fake-hermes.ts`), on Hermes's own routes and event names. That includes Chips's golden
-scenario. The SDK and the kit are in `vendor/`, packed from a Chips checkout with
+(`test/fake-hermes.ts`), on Hermes's own routes and event names, and its webhook's signed
+readings. That includes Chips's golden scenario. Hermes's own files are in temporary homes: no
+test reads or writes `~/.hermes`. The SDK and the kit are in `vendor/`, packed from a Chips checkout with
 `pnpm release:sdk <this repo>/vendor`.
 
 ```
