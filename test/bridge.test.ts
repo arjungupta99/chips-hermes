@@ -824,7 +824,7 @@ describe("a reply a person says wasn't right (Chips ADR 0200)", () => {
 });
 
 describe("what it asks", () => {
-  it("asks on a card, and gives Hermes the person's always", async () => {
+  it("asks on a card, and gives Hermes a command's Always as once (Chips ADR 0239)", async () => {
     const { chips, hermes } = await rig();
     await chips.say("ask first");
     const asked = await sent(chips, "approval.request");
@@ -832,10 +832,11 @@ describe("what it asks", () => {
     assert.deepEqual(asked.payload["action"], { kind: "shell.exec", input: { command: "npm test", description: "Run the tests" } });
     await chips.decide(String(asked.payload["approval_id"]), "approved", { scope: "always" });
     const words = await sent(chips, "message.post", (event) => event.run_id === asked.run_id);
-    assert.equal(words.payload["text"], "Given: always");
+    // Chips remembers how the command starts and answers the next one itself.
+    assert.equal(words.payload["text"], "Given: once");
     const executed = await sent(chips, "approval.executed");
     assert.equal(executed.payload["outcome"], "executed", "the allowed call said how it went");
-    assert.deepEqual(hermes.answers, [{ choice: "always", request_id: "req_1" }]);
+    assert.deepEqual(hermes.answers, [{ choice: "once", request_id: "req_1" }]);
     // What the command printed, not the JSON Hermes's terminal wraps it in.
     const ran = await sent(chips, "step.log", (event) => event.payload["status"] === "done");
     assert.equal(ran.payload["summary"], "12 passed");
@@ -868,6 +869,10 @@ describe("what it asks", () => {
     assert.equal(choiceOf(decision("always"), ["once", "session", "deny"]), "session");
     assert.equal(choiceOf(decision("session"), ["once", "deny"]), "once");
     assert.equal(choiceOf(decision("once", false), ["once", "deny"]), "deny");
+    // A command's Always or This session is Hermes's once: Chips remembers its starts (ADR 0239).
+    assert.equal(choiceOf(decision("always"), ["once", "session", "always", "deny"], true), "once");
+    assert.equal(choiceOf(decision("session"), ["once", "session", "deny"], true), "once");
+    assert.equal(choiceOf(decision("always", false), ["once", "deny"], true), "deny");
   });
 });
 

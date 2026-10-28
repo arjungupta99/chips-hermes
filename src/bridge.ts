@@ -1075,7 +1075,7 @@ export class Bridge {
     const generation = event["execution_generation"];
     await turn.agent.client
       .approve(turn.hermesRun, {
-        choice: choiceOf(decision, choices),
+        choice: choiceOf(decision, choices, command !== undefined),
         ...(requestId === undefined ? {} : { request_id: requestId }),
         ...(typeof generation === "number" ? { execution_generation: generation } : {}),
       })
@@ -1210,9 +1210,14 @@ export class Bridge {
 
 // ------------------------------------------------------------------ small words
 
-/** Hermes's choice for a person's answer: their scope where Hermes offers it, else once. */
-export function choiceOf(decision: Decision, choices: readonly string[]): string {
+/**
+ * Hermes's choice for a person's answer: their scope where Hermes offers it, else once. A
+ * command's Always or This session is Hermes's once (Chips ADR 0239): Chips remembers how each
+ * part of it starts and answers the next ask itself, where Hermes's own would let through more.
+ */
+export function choiceOf(decision: Decision, choices: readonly string[], command = false): string {
   if (!decision.allowed) return "deny";
+  if (command) return "once";
   if (decision.scope === "always" && choices.includes("always")) return "always";
   if (decision.scope !== "once" && choices.includes("session")) return "session";
   return "once";
