@@ -6,7 +6,7 @@ on Hermes's own API server.
 - Each Chips room an agent is in is a Hermes session of its profile, made the first time somebody
   there speaks to it.
 - A new agent a person asks for in a room (Add, then a new one) runs on the first profile, in a
-  session of its own.
+  session of its own. So does the agent of a space a person asks Hermes for from the +.
 - A copy of an agent a person asks for in another room (Fork) is a fork of its session there in
   Hermes, so it remembers everything the agent did; from then on the two go on apart. It runs on
   its original's profile, in its original's folder.
@@ -25,6 +25,7 @@ Apache-2.0. Not published: a local repository until Chips's SDK is.
 | Cost | the run's tokens; a sub-agent's `cost_usd` as its step's share |
 | An approval card | `approval.request` → `POST …/approval`: once, session or always where Hermes offers it, else once, and once for a command, which Chips remembers by how each part starts (Chips ADR 0239); deny for a no. One answered in Hermes's own tools is settled in Chips (ADR 0079) |
 | "Not right?" on a reply (ADR 0200) | a run of the agent that said it, in its session in the room, after the room's other turns: told its reply and the person's note (or, for a bare 👎, that there was none), it answers again in its place |
+| A space from the + (ADR 0241) | claimed under a key made from the space and named from its first words, which a new agent of the harness answers, in a session of its own; what is said there next goes to the same session |
 | Fork (ADR 0087) | `POST /api/sessions/{id}/fork` of the agent's session in the room it is in (else the last it had), from its latest id when Hermes has compressed it, under an id made from the ask, so an ask heard twice forks once. Hermes ends the original as `branched`, and the original's runs go on in it. A turn still going isn't in the copy. An agent that never spoke is copied with nothing to remember |
 | Stop | `POST …/stop` |
 | A steer, a follow-up, an interrupt | `POST …/steer`; the next run of the turn; stop, then the next run with the words |

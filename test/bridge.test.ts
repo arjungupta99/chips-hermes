@@ -20,6 +20,7 @@ import {
   keyOf,
   lookAgain,
   lookingAgain,
+  titleFrom,
   WANTS,
 } from "../src/bridge.ts";
 import { HermesClient } from "../src/hermes.ts";
@@ -178,6 +179,50 @@ describe("a new agent a person asks for (Chips ADR 0108)", () => {
     assert.deepEqual([...took].sort(), [...made].sort(), "each took its turn as itself");
     assert.equal(new Set(hermes.started.map((run) => run.sessionId)).size, 2, "two Hermes sessions");
     assert.deepEqual(Object.keys(state.sessions).sort(), made.map((id) => `${id}|${room}`).sort());
+  });
+});
+
+// Hermes took no spaces from the +, which the ACP bridge did (Chips ADR 0241).
+describe("a space a person asks for from the + (Chips ADR 0241)", () => {
+  it("is claimed and named, and an agent of its own answers the first words in a session of its own", async () => {
+    const chips = await startFakeChips({ capabilities: ["agents", "new_spaces"] });
+    open.push(() => chips.close());
+    const { client, hermes, state } = await rig({ chips });
+    const { spaceId } = await chips.askForSpace("Plan a weekend in Lisbon for two");
+    const claimed = await sent(chips, "space.claimed", (event) => event.space_id === spaceId);
+    assert.equal(claimed.payload["title"], "Plan a weekend in Lisbon for two");
+    const words = await sent(chips, "message.post", (event) => event.space_id === spaceId && event.run_id !== null);
+    const agent = (await client.agents.list()).find((each) => each.key === `hermes:space:${spaceId}`);
+    assert.ok(agent !== undefined, "the agent Chips made for the claim");
+    assert.equal(words.actor.id, agent.agentId);
+    assert.deepEqual(agent.spaces, [spaceId]);
+    const started = await sent(chips, "run.started", (event) => event.space_id === spaceId);
+    assert.equal(started.payload["goal"], "Plan a weekend in Lisbon for two");
+    const ran = hermes.started.at(-1);
+    assert.match(ran?.input ?? "", /Plan a weekend in Lisbon for two$/);
+    assert.equal(ran?.sessionId, state.sessions[`${agent.agentId}|${spaceId}`], "a session of its own");
+  });
+
+  it("answers what is said next in the same session", async () => {
+    const chips = await startFakeChips({ capabilities: ["agents", "new_spaces"] });
+    open.push(() => chips.close());
+    const { hermes } = await rig({ chips });
+    const { spaceId } = await chips.askForSpace("Plan a weekend in Lisbon for two");
+    await sent(chips, "run.completed", (event) => event.space_id === spaceId);
+    const asked = await chips.say("make it Porto", spaceId);
+    await sent(chips, "run.completed", (event) => event.space_id === spaceId && event.seq > asked.seq);
+    const [first, next] = hermes.started.slice(-2);
+    assert.equal(next?.sessionId, first?.sessionId);
+    assert.match(next?.history[0] ?? "", /Plan a weekend in Lisbon for two$/);
+  });
+
+  it("names a space from the first line of what it is for, and asks to take spaces", () => {
+    assert.equal(titleFrom("Short one\nand more"), "Short one");
+    assert.equal(
+      titleFrom("Work out why the nightly backup to the NAS keeps failing after midnight"),
+      "Work out why the nightly backup to the NAS…",
+    );
+    assert.ok(WANTS.includes("new_spaces"), "so the + offers Hermes");
   });
 });
 

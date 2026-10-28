@@ -18,6 +18,9 @@
  * A reply a person says wasn't right ("Not right?", Chips ADR 0200) is a turn of the agent that
  * said it, in the same session: shown its reply and the note, it answers again in its place.
  *
+ * A space a person asks the harness for from the + (Chips ADR 0241) is claimed under a new agent
+ * of the harness, which answers its first words.
+ *
  * A copy of an agent a person asks for in another room (ADR 0087, Fork) is a fork of its session
  * in Hermes: the copy remembers everything the agent did, and from then on the two go on apart. It
  * answers through its original's profile and works in its original's folder.
@@ -43,6 +46,7 @@ import type {
   Project,
   Run,
   SettingsHandlers,
+  SpaceAsked,
   Speaker,
 } from "@chipschat/harness";
 import { heldNote, promptFor, pushedInWords, Refuse, sendAnswer, sendingFiles } from "@chipschat/harness";
@@ -104,11 +108,20 @@ export interface BridgeState {
 
 /**
  * What it asks to be allowed when it joins with a code: to speak for its agents (ADR 0087), to
- * make a new one a person asks for in a room (ADR 0108), to copy one (ADR 0087, Fork), and to show
- * each agent's context (ADR 0134) and context window (ADR 0146), and to restart Hermes's gateway
- * when a person asks (ADR 0094, `gateway.ts`). A link carries what the person chose instead.
+ * take a space a person asks for from the + (ADR 0241), to make a new agent a person asks for in a
+ * room (ADR 0108), to copy one (ADR 0087, Fork), and to show each agent's context (ADR 0134) and
+ * context window (ADR 0146), and to restart Hermes's gateway when a person asks (ADR 0094,
+ * `gateway.ts`). A link carries what the person chose instead.
  */
-export const WANTS: readonly string[] = ["agents", "new_agents", "forks", "context_files", "context_windows", "restarts"];
+export const WANTS: readonly string[] = [
+  "agents",
+  "new_spaces",
+  "new_agents",
+  "forks",
+  "context_files",
+  "context_windows",
+  "restarts",
+];
 
 export interface BridgeOptions {
   readonly chips: Chips;
@@ -320,8 +333,11 @@ export class Bridge {
   private readonly names = new Map<string, string>();
   /** The feedback events answered with a turn, the newest `KEPT_FEEDBACK`. */
   private readonly lookedAt = new Set<string>();
-  /** The copies being made, one after another: a message for one waits for it (see `copy`). */
-  private copying: Promise<void> = Promise.resolve();
+  /**
+   * The spaces claimed and the copies made, one after another: a message for an agent not known
+   * yet waits for them (see `copy`).
+   */
+  private making: Promise<void> = Promise.resolve();
   private readonly log: (line: string) => void;
   private health: ReturnType<typeof setInterval> | undefined;
   /** The harness's agents in Chips as last listed: whose context and window copies are sent. */
@@ -386,9 +402,14 @@ export class Bridge {
       this.make(asked).catch((error: unknown) => this.log(`a new agent went wrong: ${messageOf(error)}`));
     });
     chips.on("agent.fork", (fork) => {
-      this.copying = this.copying
+      this.making = this.making
         .then(() => this.copy(fork))
         .catch((error: unknown) => this.log(`a copy went wrong: ${messageOf(error)}`));
+    });
+    chips.onSpaceAsked((asked) => {
+      this.making = this.making
+        .then(() => this.claim(asked))
+        .catch((error: unknown) => this.log(`a space from the + went wrong: ${messageOf(error)}`));
     });
     chips.on("feedback", (feedback) => {
       this.notRight(feedback).catch((error: unknown) => this.log(`a note on a reply went wrong: ${messageOf(error)}`));
@@ -596,6 +617,44 @@ export class Bridge {
   }
 
   /**
+   * A space a person asked the harness for from the + (Chips ADR 0241), as the ACP bridge takes
+   * one: claimed under a key made from the space, so a space handed over twice is claimed once,
+   * and named from its first words. Chips makes the agent of that key and puts it in the space. It
+   * answers the first words, which are the ask's and aren't heard again, in a session of its own.
+   */
+  private async claim(asked: SpaceAsked): Promise<void> {
+    const { chips } = this.options;
+    const { spaceId, firstMessage } = asked;
+    const key = `hermes:space:${spaceId}`;
+    await chips.claimSpace(spaceId, key, titleFrom(firstMessage.text));
+    const agent = (await chips.agents.list()).find((each) => each.key === key);
+    if (agent === undefined) {
+      this.log(`claimed ${spaceId}, and Chips put no agent there`);
+      return;
+    }
+    this.ours.add(agent.agentId);
+    this.names.set(agent.agentId, agent.name);
+    this.log(`${agent.name} claimed ${spaceId}`);
+    void this.agentsMoved();
+    // Said to the agent as a message of the person's, under the first words' own id.
+    const message = {
+      type: "message.new",
+      space_id: spaceId,
+      message_id: firstMessage.messageId,
+      text: firstMessage.text,
+      from: { participant_id: asked.askedBy, kind: "person", display_name: await this.whoSaid(asked), role: "member" },
+      for: [agent.agentId],
+    } as unknown as MessageNew;
+    void this.hear(message);
+  }
+
+  /** Who said a space's first words, from its lines. */
+  private async whoSaid(asked: SpaceAsked): Promise<string> {
+    const context = await this.options.chips.roomContext(asked.spaceId, { limit: 20 }).catch(() => undefined);
+    return context?.lines.find((line) => line.message_id === asked.firstMessage.messageId)?.from.name ?? "Someone";
+  }
+
+  /**
    * A person asked for a copy of one of the harness's agents in another room (ADR 0087, Fork): the
    * agent's session in the room it is in, else the last it had, forked in Hermes, is the copy's
    * session in the room asked. The copy answers through its original's profile, whose Hermes has
@@ -792,7 +851,7 @@ export class Bridge {
    * copy being made, which is waited for, so that its first message is answered in its session.
    */
   private async runnerOf(taker: string): Promise<Running | undefined> {
-    if (taker !== this.options.chips.harnessId && !this.ours.has(taker)) await this.copying;
+    if (taker !== this.options.chips.harnessId && !this.ours.has(taker)) await this.making;
     return this.profileOf(taker);
   }
 
@@ -1254,6 +1313,14 @@ function idOf(event: RunEvent): string | undefined {
 function messageOf(error: unknown): string {
   if (error instanceof HermesError) return `${error.message} (${error.status})`;
   return error instanceof Error ? error.message : String(error);
+}
+
+/** A space's name from what it is for: the first line, cut at a word near 48 characters. */
+export function titleFrom(text: string): string {
+  const line = text.trim().split("\n")[0] ?? "";
+  if (line.length <= 48) return line;
+  const cut = line.slice(0, 48);
+  return `${cut.slice(0, Math.max(cut.lastIndexOf(" "), 24))}…`;
 }
 
 /** A copy's name, as Jacobian names its forks: `Nova · fork`, which Chips numbers when it is taken. */

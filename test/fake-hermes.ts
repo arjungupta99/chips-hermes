@@ -15,8 +15,8 @@
  * as `branched`, then the title, refused when another session has it. `compress` moves a session
  * on to a new id, as Hermes's compression does, which a run naming the old id is taken to.
  *
- * With `askFirst`, every run asks before it answers, as the golden scenario needs. With `usage`, a
- * run's end says it counted that, in place of Hermes 0.22.0's counts.
+ * With `askFirst`, every run in the first session it made asks before it answers, as the golden
+ * scenario needs. With `usage`, a run's end says it counted that, in place of Hermes 0.22.0's counts.
  *
  * With `hook` set, it says how full the session is as Hermes's outbound webhook does after each
  * model call (`post_api_request`), signed, before the run's events: the prompt tokens in `fills`
@@ -240,7 +240,7 @@ export async function startFakeHermes(
     }
     // The person's words, the input's last line: not the room note before them, which may say "ask".
     const words = run.input.split("\n").at(-1) ?? "";
-    if (options.askFirst === true || /\bask\b/.test(words)) {
+    if ((options.askFirst === true && run.session === fake.sessions[0]) || /\bask\b/.test(words)) {
       emit(run, "tool.started", { tool: "terminal", preview: "npm test", tool_call_id: "call_1" });
       const choice = await asked(run, {
         request_id: "req_1",

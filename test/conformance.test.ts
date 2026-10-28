@@ -1,7 +1,7 @@
 /**
  * The golden scenario of Chips's conformance kit, played against the bridge and a scripted Hermes
  * that asks before it acts: what `chips conformance custom --capabilities
- * agents,new_agents,context_files,context_windows,restarts` checks of it live. Hermes's own files
+ * agents,new_spaces,new_agents,context_files,context_windows,restarts` checks of it live. Hermes's own files
  * are in a temporary home, and the scripted Hermes says how full each session is through the
  * webhook. A restart here restarts nothing: what Restart does to Hermes's gateway is
  * `gateway.test.ts`'s, on a machine of its own.
@@ -31,7 +31,7 @@ it("passes the golden scenario", async () => {
       beatTimeoutMs: 3000,
       subject: {
         name: "chips-hermes",
-        capabilities: ["agents", "new_agents", "context_files", "context_windows", "restarts"],
+        capabilities: ["agents", "new_spaces", "new_agents", "context_files", "context_windows", "restarts"],
         start: async (address) => {
           const onRestart = restarter({
             restart: async () => undefined,
@@ -72,10 +72,14 @@ it("passes the golden scenario", async () => {
       [
         ["Talks", 1],
         ["Supervised", 1],
-        ["Lives in Chips", 3],
+        ["Lives in Chips", 4],
         ["Managed from Chips", 2],
       ],
     );
+    const outcomes = Object.fromEntries(
+      (report.levels[2]?.capabilities ?? []).map((each) => [each.capability, each.outcome]),
+    );
+    assert.equal(outcomes["new_spaces"], "passed");
   } finally {
     await hermes.close();
   }
