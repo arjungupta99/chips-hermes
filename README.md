@@ -14,7 +14,7 @@ on Hermes's own API server.
   its original's profile, in its original's folder: Hermes forks a session only within its
   profile, so a copy has no profile of its own.
 
-Apache-2.0. Not published: a local repository until Chips's SDK is.
+Apache-2.0, published on npm as `@chipschat/hermes`.
 
 ## What Chips shows
 
@@ -83,11 +83,11 @@ hasn't been tried through Chips yet.
 
 ## From Chips's gallery
 
-The card's line is `chips connect hermes '<link>'` (Chips ADR 0218). It downloads this bridge as the npm package
+The card's line is `CHIPS_JOIN_LINK='<link>' chips connect hermes` (Chips ADR 0218). It downloads this bridge as the npm package
 `@chipschat/hermes`, the newest 1.x, checks it against the registry's checksum, and runs it on the Node
 that Chips carries, so the machine needs no Node or npm of its own. The bridge checks Hermes,
 joins, and keeps itself running from login. `chips disconnect hermes` stops it. On another computer,
-`curl -fsSL https://chipschat.ai/install | sh -s -- connect hermes '<link>'` installs Chips there
+`curl -fsSL https://chipschat.ai/install | CHIPS_JOIN_LINK='<link>' sh -s -- connect hermes` installs Chips there
 first. The steps below run the bridge from this checkout instead, to work on it.
 
 ## Run it
@@ -103,11 +103,11 @@ first. The steps below run the bridge from this checkout instead, to work on it.
 
 2. Once, in this repository: `npm install`.
 
-3. Join Chips once, with a link from Chips's gallery (Add an agent → Hermes), whose card gives
+3. Join Chips once, with a link from Chips's gallery (Agents → Connect a harness → Hermes), whose card gives
    this line with the link in it:
 
    ```
-   cd ~/Work/Chips/chips-hermes && CHIPS_JOIN_LINK='<link>' npm run keep
+   cd chips-hermes && CHIPS_JOIN_LINK='<link>' npm run keep
    ```
 
    `npm run keep` joins, then keeps the bridge running from login (below); `npm start` is the

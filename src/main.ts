@@ -41,6 +41,7 @@ import { hookPortIn } from "./hooks.js";
 import { keepIfAsked, stopIfAsked, words } from "./keep.js";
 import { hermesProfiles } from "./profiles.js";
 import { type Config, checkedWords, checkHermes, readConfig, readyHooks, SetupError } from "./setup.js";
+import { VERSION } from "./version.js";
 
 const home = (path: string) => (path.startsWith("~/") ? join(homedir(), path.slice(2)) : path);
 const link = process.env["CHIPS_JOIN_LINK"] || undefined;
@@ -123,7 +124,7 @@ const joined = await joinChips({
   link,
   url: process.env["CHIPS_URL"],
   name,
-  software: "chips-hermes 1.0.0",
+  software: `chips-hermes ${VERSION}`,
   wants: WANTS,
   onCode: (code) => log(`Allow this harness in Chips: ${code}`),
 }).catch(refused);
@@ -145,7 +146,7 @@ const restart = restarter({
 const chips = await connect({
   url: joined.url,
   token: joined.token,
-  client: { name: "chips-hermes", version: "1.0.0" },
+  client: { name: "chips-hermes", version: VERSION },
   store: fileStore(join(folder, "chips-state.json")),
   onRestart: restart,
   settings: settingsFor(() => bridge),
