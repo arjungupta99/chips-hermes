@@ -1,0 +1,46 @@
+# Publishes this bridge to npm when a release lands on main, that is when package.json holds a
+# version npm doesn't have yet; a version npm already has is left alone. npm trusts this workflow
+# (trusted publishing, set up per package on npmjs.com), so no npm token or sign-in is kept anywhere.
+name: Publish
+
+on:
+  push:
+    branches: [main]
+    paths: [package.json]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: publish
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+          package-manager-cache: false
+      - name: Is this version on npm yet?
+        id: npm
+        run: |
+          name=$(node -p 'require("./package.json").name')
+          version=$(node -p 'require("./package.json").version')
+          if [ -n "$(npm view "$name@$version" version 2>/dev/null)" ]; then
+            echo "$name@$version is already on npm"
+            echo "new=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "new=true" >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.npm.outputs.new == 'true'
+        run: npm ci
+      - if: steps.npm.outputs.new == 'true'
+        run: npm test
+      - if: steps.npm.outputs.new == 'true'
+        run: npm publish
