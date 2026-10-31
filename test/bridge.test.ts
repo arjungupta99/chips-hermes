@@ -20,6 +20,7 @@ import {
   keyOf,
   lookAgain,
   lookingAgain,
+  MARKDOWN_HERE,
   titleFrom,
   WANTS,
 } from "../src/bridge.ts";
@@ -681,6 +682,8 @@ describe("the files an answer names", () => {
     const told = hermes.started[0]?.instructions ?? "";
     assert.match(told, /MEDIA:<path> on a line of its own/, "it was told how");
     assert.match(told, /does not hold for these runs/, "and that Hermes's own hint is wrong here");
+    // And that Chips shows Markdown, over the same hint's plain text (Chips, 30 October 2026).
+    assert.ok(told.includes(`\n\n${MARKDOWN_HERE}\n\n`), told);
     assert.doesNotMatch(hermes.started[0]?.input ?? "", /MEDIA:<path>/, "once");
   });
 

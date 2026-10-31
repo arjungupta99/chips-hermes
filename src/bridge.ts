@@ -242,9 +242,19 @@ export function filesHere(project = false): string {
 export const FILES_HERE = filesHere();
 
 /**
+ * That Chips shows Markdown, as each run's instructions say. Hermes's hint for its API server says
+ * to assume plain text, with no headings, lists, bold or code fences, so its agents wrote plain
+ * text in a room where every other harness's agent wrote Markdown (Chips, 30 October 2026).
+ */
+export const MARKDOWN_HERE =
+  "Hermes's note that this API server's replies are plain text does not hold for these runs either: " +
+  "Chips shows your answer as Markdown, so use headings, lists, bold, tables and code blocks where " +
+  "they help a reader.";
+
+/**
  * Each run's instructions: how a file reaches the room (with the room's project, a file that isn't
- * in it: Chips AP-9), where the agent's own folder is, and the room's rules (`rulesFor`, Chips
- * ADR 0250). Hermes keeps instructions out of the session, so a turn's words carry the facts only
+ * in it: Chips AP-9), where the agent's own folder is, that Chips shows Markdown, and the room's
+ * rules (`rulesFor`, Chips ADR 0250). Hermes keeps instructions out of the session, so a turn's words carry the facts only
  * and the rules don't pile up in the session, turn after turn.
  */
 export function instructionsFor(folder: string | undefined, project = false, rules = ""): string {
@@ -253,7 +263,7 @@ export function instructionsFor(folder: string | undefined, project = false, rul
     folder === undefined
       ? files
       : `${files} Your own folder is ${folder}: make and keep your files there, and run your commands from there.`;
-  return rules === "" ? here : `${here}\n\n${rules}`;
+  return [here, MARKDOWN_HERE, rules].filter((part) => part !== "").join("\n\n");
 }
 
 /** A folder under `root` named after an agent, `-2` and on when another agent has that one. */
