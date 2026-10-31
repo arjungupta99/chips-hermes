@@ -6,6 +6,8 @@
  * - `elsewhere` asks, and is answered in Hermes's own tools.
  * - `fail` fails.
  * - `slow` writes until it is stopped.
+ * - `listen` works until it is steered, or a while, then answers; with `late`, it keeps the steer
+ *   back as Hermes does one it couldn't give before the run ended (`pending_steer`).
  * - `drop` loses its stream midway and is read from its state.
  * - A reply a person said wasn't right (Chips ADR 0200) is answered again.
  * - Anything else reads a file and answers.
@@ -301,6 +303,13 @@ export async function startFakeHermes(
         await sleep(20);
       }
       return;
+    }
+    if (/\blisten\b/.test(words)) {
+      const before = fake.steers.length;
+      for (let i = 0; i < 150 && run.status === "running" && fake.steers.length === before; i += 1) await sleep(20);
+      const kept = /\blate\b/.test(words) ? fake.steers.slice(before).join("\n") : "";
+      const output = "Heard you.";
+      return finish(run, "completed", { completed: true, output, usage, runtime: { model: "heron-2" }, ...(kept === "" ? {} : { pending_steer: kept }) });
     }
     if (/\bdelegate\b/.test(words)) {
       emit(run, "subagent.start", { goal: "Find three quotes" });

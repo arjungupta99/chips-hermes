@@ -57,12 +57,14 @@ import type {
 } from "@chipschat/harness";
 import {
   heldNote,
+  overheardLine,
   promptFor,
   pushedInWords,
   Refuse,
   rulesFor,
   sendAnswer,
   sendingFiles,
+  workingTurnsOf,
 } from "@chipschat/harness";
 import {
   type AgentAsked,
@@ -72,6 +74,7 @@ import {
   FORK_WAIT_MS,
   type Feedback,
   type MessageNew,
+  type MessageOverheard,
   messageIdOf,
   type ModelChangeFrame,
   type ProjectFacts,
@@ -372,6 +375,8 @@ interface Turn {
   readonly allowed: string[];
   /** A person's interrupt stopped the Hermes run: the turn goes on with their words. */
   interrupted: boolean;
+  /** Words said in the room while it works, steered into the Hermes run going: heard once it gives them (Chips ADR 0106). */
+  readonly overheard: { readonly messageId: string; readonly line: string }[];
   /** The folder the agent works in and its files are sent from, said in each run's instructions. */
   folder?: string | undefined;
   /** The room's rules, said in each run's instructions rather than in its words (Chips ADR 0250). */
@@ -383,6 +388,8 @@ interface Turn {
 export class Bridge {
   private readonly agents: Running[] = [];
   private readonly rooms = new Map<string, Room>();
+  /** The turns going, by their Chips run, for what is said in their rooms while they work (Chips ADR 0106). */
+  private readonly working = new Map<string, Turn>();
   /** Every Chips agent of the harness's, configured here or not. */
   private ours = new Set<string>();
   /** The harness's agents' names, by Chips id, for the folders named after them. */
@@ -462,6 +469,7 @@ export class Bridge {
     }
     this.ours = new Set([...known.map((agent) => agent.agentId), ...this.agents.map((agent) => agent.agentId)]);
     chips.on("message.new", (message) => void this.hear(message));
+    chips.on("message.overheard", (message) => void this.overheard(message));
     chips.on("agent.asked", (asked) => {
       this.making = this.making
         .then(() => this.make(asked))
@@ -1154,7 +1162,24 @@ export class Bridge {
       approvals: new Map(),
       allowed: [],
       interrupted: false,
+      overheard: [],
     };
+    this.working.set(run.id, turn);
+    try {
+      await this.take(turn, room, { message, speakerId, sayWho });
+    } finally {
+      this.working.delete(run.id);
+    }
+  }
+
+  /** A turn begun: Hermes's runs of it, from the first words to its end. */
+  private async take(
+    turn: Turn,
+    room: Room,
+    { message, speakerId, sayWho }: Pick<Asked, "message" | "speakerId" | "sayWho">,
+  ): Promise<void> {
+    const { agent } = room;
+    const { run } = turn;
     // Heard from the start, so a Stop before Hermes has the run still stops it.
     run.on("cancel", () => {
       turn.cancelled = true;
@@ -1209,12 +1234,49 @@ export class Bridge {
       return undefined;
     }
     if (turn.cancelled) await agent.client.stop(turn.hermesRun).catch(() => undefined);
+    let last: RunEvent | undefined;
     try {
-      const last = await agent.client.events(turn.hermesRun, (event) => this.heard(turn, event));
-      return last ?? (await this.endOf(turn));
+      last = (await agent.client.events(turn.hermesRun, (event) => this.heard(turn, event))) ?? (await this.endOf(turn));
     } catch (error) {
       this.log(`lost ${agent.config.name}'s run ${turn.hermesRun}: ${messageOf(error)}`);
-      return await this.endOf(turn);
+      last = await this.endOf(turn);
+    }
+    await this.toldWhileWorking(turn, last);
+    return last;
+  }
+
+  /**
+   * Words said in a room, not to the harness, while its agents work there (Chips ADRs 0105, 0106):
+   * each turn Chips names hears them as a steer of its Hermes run, which Hermes gives the model
+   * after the step it is on. A run that won't take a steer is ending, and its agent's next turn is
+   * handed the words.
+   */
+  private async overheard(message: MessageOverheard): Promise<void> {
+    const line = overheardLine(message);
+    for (const { runId } of workingTurnsOf(message)) {
+      const turn = this.working.get(runId);
+      if (turn === undefined || turn.run.over || turn.hermesRun === "") continue;
+      try {
+        await turn.agent.client.steer(turn.hermesRun, line);
+        turn.overheard.push({ messageId: message.message_id, line });
+      } catch {
+        // Ending, or not started: the agent's next turn has the words with the room's lines.
+      }
+    }
+  }
+
+  /**
+   * Which of the words steered into a run it heard: those Hermes gave it before it completed, not
+   * those it kept back as `pending_steer`, nor any in a run that failed or was stopped. Chips is
+   * told of each, and the room shows the agent heard it while working (Chips ADR 0106).
+   */
+  private async toldWhileWorking(turn: Turn, last: RunEvent | undefined): Promise<void> {
+    const told = turn.overheard.splice(0);
+    if (last?.event !== "run.completed") return;
+    const kept = typeof last["pending_steer"] === "string" ? last["pending_steer"] : "";
+    for (const { messageId, line } of told) {
+      if (kept.includes(line)) continue;
+      await turn.run.heard(messageId).catch((error: unknown) => this.log(`couldn't say a turn heard ${messageId}: ${messageOf(error)}`));
     }
   }
 

@@ -1141,6 +1141,35 @@ describe("what a person does to it", () => {
   });
 });
 
+describe("words said in the room while it works (Chips ADRs 0105, 0106)", () => {
+  it("are steered into its run, and Chips is told it heard them", async () => {
+    const { chips, hermes } = await rig();
+    await chips.say("listen");
+    const started = await sent(chips, "run.started");
+    await until(() => hermes.started.length > 0);
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    const said = await chips.asOwner({ type: "message.post", space_id: started.space_id, text: "@Arjun The quotes are in." });
+    const heard = await sent(chips, "message.heard");
+    assert.equal(heard.run_id, started.run_id);
+    assert.equal(heard.payload["message_id"], messageIdOf(said.id));
+    assert.equal(hermes.steers[0], "Arjun (owner) said in the room, not to you: @Arjun The quotes are in.");
+    await sent(chips, "run.completed");
+  });
+
+  it("say nothing of a run that ended before Hermes gave them", async () => {
+    const { chips, hermes } = await rig();
+    await chips.say("listen late");
+    const started = await sent(chips, "run.started");
+    await until(() => hermes.started.length > 0);
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    await chips.asOwner({ type: "message.post", space_id: started.space_id, text: "@Arjun The quotes are in." });
+    await until(() => hermes.steers.length > 0);
+    await sent(chips, "run.completed");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(chips.workspace.log.find((event) => event.type === "message.heard"), undefined);
+  });
+});
+
 describe("an interrupt", () => {
   it("stops Hermes's run and goes on with the person's words", async () => {
     const { chips, hermes } = await rig();
