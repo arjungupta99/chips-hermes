@@ -10,7 +10,8 @@
  *
  * A message for an agent is a run, the same on both sides:
  * - It starts with `POST /v1/runs`, telling the session what Chips hands over: the room note, what
- *   was said, and the words.
+ *   was said, and the words. The room's rules go in the run's instructions, which Hermes keeps
+ *   out of the session (Chips ADR 0250).
  * - Hermes's reasoning and interim words are the run's status.
  * - Its tool calls and sub-agents are steps.
  * - What it asks before acting is an approval card.
@@ -54,7 +55,15 @@ import type {
   SpaceAsked,
   Speaker,
 } from "@chipschat/harness";
-import { heldNote, promptFor, pushedInWords, Refuse, sendAnswer, sendingFiles } from "@chipschat/harness";
+import {
+  heldNote,
+  promptFor,
+  pushedInWords,
+  Refuse,
+  rulesFor,
+  sendAnswer,
+  sendingFiles,
+} from "@chipschat/harness";
 import {
   type AgentAsked,
   type AgentFork,
@@ -234,13 +243,17 @@ export const FILES_HERE = filesHere();
 
 /**
  * Each run's instructions: how a file reaches the room (with the room's project, a file that isn't
- * in it: Chips AP-9), and where the agent's own folder is.
+ * in it: Chips AP-9), where the agent's own folder is, and the room's rules (`rulesFor`, Chips
+ * ADR 0250). Hermes keeps instructions out of the session, so a turn's words carry the facts only
+ * and the rules don't pile up in the session, turn after turn.
  */
-export function instructionsFor(folder: string | undefined, project = false): string {
+export function instructionsFor(folder: string | undefined, project = false, rules = ""): string {
   const files = filesHere(project);
-  return folder === undefined
-    ? files
-    : `${files} Your own folder is ${folder}: make and keep your files there, and run your commands from there.`;
+  const here =
+    folder === undefined
+      ? files
+      : `${files} Your own folder is ${folder}: make and keep your files there, and run your commands from there.`;
+  return rules === "" ? here : `${here}\n\n${rules}`;
 }
 
 /** A folder under `root` named after an agent, `-2` and on when another agent has that one. */
@@ -351,6 +364,8 @@ interface Turn {
   interrupted: boolean;
   /** The folder the agent works in and its files are sent from, said in each run's instructions. */
   folder?: string | undefined;
+  /** The room's rules, said in each run's instructions rather than in its words (Chips ADR 0250). */
+  rules?: string | undefined;
   /** The agent's copy of the room's project, brought up to date as the turn began, and its name (Chips ADR 0221). */
   project?: { readonly copy: Project; readonly name: string } | undefined;
 }
@@ -1149,7 +1164,8 @@ export class Bridge {
     const name = speakerId === undefined ? agent.config.name : await this.nameOf(speakerId, agent.config.name);
     turn.folder = this.folderOf(agent, speakerId ?? agent.agentId, name);
     const project = await this.projectFor(turn, room.spaceId, speakerId ?? agent.agentId, name);
-    let text: string | undefined = promptFor(message, { taker: speakerId, sayWho, project });
+    turn.rules = rulesFor(message, { taker: speakerId, project });
+    let text: string | undefined = promptFor(message, { taker: speakerId, sayWho, project, rulesHeld: true });
     for (let round = 0; text !== undefined && !turn.cancelled && !run.over; round += 1) {
       const last = await this.once(turn, session, text, `${run.id}:${round}`);
       if (last === undefined) return;
@@ -1176,7 +1192,7 @@ export class Bridge {
         sessionId: session,
         ...this.runModel(turn),
         key,
-        instructions: instructionsFor(turn.folder, turn.project !== undefined),
+        instructions: instructionsFor(turn.folder, turn.project !== undefined, turn.rules),
       });
     } catch (error) {
       await this.failed(turn, `${agent.config.name} couldn't start in Hermes: ${messageOf(error)}`, true);

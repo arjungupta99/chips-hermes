@@ -652,6 +652,19 @@ describe("the files an answer names", () => {
     return join(root, "work");
   }
 
+  it("says the room's rules in each run's instructions, and the facts in its words (Chips ADR 0250)", async () => {
+    const { chips, hermes } = await rig();
+    await chips.say("one");
+    await sent(chips, "run.completed");
+    await chips.say("two");
+    await chips.waitFor((event) => (event.type === "run.completed" && hermes.started.length === 2 ? event : undefined), 3000);
+    for (const run of hermes.started) {
+      assert.match(run.instructions ?? "", /\n\nEveryone here reads what you write\.$/);
+      assert.doesNotMatch(run.input ?? "", /Everyone here reads what you write/);
+      assert.match(run.input ?? "", /^In this space:/);
+    }
+  });
+
   it("sends each file a MEDIA: line names from its folder, and says what it couldn't send", async () => {
     const { chips, hermes } = await rig({ folder: folders() });
     await chips.say("send the page");
@@ -731,7 +744,9 @@ describe("the room's project (Chips ADR 0221)", () => {
     const changed = await sent(chips, "project.changed");
     assert.equal(changed.payload["by"], agentId);
     assert.deepEqual(changed.payload["files"], [{ path: "notes.md", added: 1, removed: 0 }]);
-    assert.match(hermes.started[1]?.input ?? "", /In Markdown, put each sentence on a line of its own\./);
+    // An ask of the project's, said with the room's rules in the run's instructions (Chips ADR 0250).
+    assert.match(hermes.started[1]?.instructions ?? "", /In Markdown, put each sentence on a line of its own\./);
+    assert.doesNotMatch(hermes.started[1]?.input ?? "", /In Markdown/);
   });
 
   // The live check on 23 October logged "Hermes's project" for Quill's push, signed by Quill.
