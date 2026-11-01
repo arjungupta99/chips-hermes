@@ -1438,7 +1438,7 @@ export class Bridge {
         kind: command === undefined ? "hermes.approval" : "shell.exec",
         input: { ...(command === undefined ? {} : { command }), ...(description === undefined ? {} : { description }) },
       },
-      question: (description === undefined ? "Run this command?" : `Allow it to ${lowerFirst(description)}?`).slice(0, 300),
+      question: description === undefined ? "Run this command?" : `Allow it to ${cut(lowerFirst(description), QUESTION_MAX - 13)}?`,
       lasts: "once",
       risk: [],
       ...(command === undefined
@@ -1659,6 +1659,9 @@ export function lookingAgain(note: string | undefined): string {
   const first = note?.split("\n").find((line) => line.trim() !== "")?.trim();
   return first === undefined ? "Looking again at its reply" : cut(`Looking again: ${first}`, GOAL_SHOWN);
 }
+
+/** The most an approval's question holds: the protocol's `maxLength`, past which Chips refuses the ask. */
+const QUESTION_MAX = 200;
 
 function cut(text: string, most: number): string {
   return text.length <= most ? text : `${text.slice(0, most - 1)}…`;

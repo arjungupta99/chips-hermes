@@ -1,7 +1,8 @@
 /**
  * A scripted Hermes API server for the tests, on Hermes's own routes and event names: a run plays
  * by the words it was given.
- * - `ask` asks before running a command, and says the choice it was given.
+ * - `ask` asks before running a command, and says the choice it was given; `ask long`, with a
+ *   description longer than an approval's question may be.
  * - `delegate` hands work to a sub-agent that says what it cost.
  * - `elsewhere` asks, and is answered in Hermes's own tools.
  * - `fail` fails.
@@ -113,6 +114,9 @@ export interface FakeHermes {
 }
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** A description longer than the protocol lets an approval's question be. */
+export const LONG_DESCRIPTION = `Run the tests ${"and the benchmarks ".repeat(12).trim()}`;
 
 export async function startFakeHermes(
   options: { askFirst?: boolean; usage?: Record<string, number> } = {},
@@ -273,7 +277,7 @@ export async function startFakeHermes(
       const choice = await asked(run, {
         request_id: "req_1",
         command: "npm test",
-        description: "Run the tests",
+        description: /\blong\b/.test(words) ? LONG_DESCRIPTION : "Run the tests",
         choices: ["once", "session", "always", "deny"],
       });
       const denied = choice === "deny";

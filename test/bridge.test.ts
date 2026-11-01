@@ -27,7 +27,7 @@ import {
 import { HermesClient } from "../src/hermes.ts";
 import { envValue } from "../src/home.ts";
 import type { ProfileMaker } from "../src/profiles.ts";
-import { type FakeHermes, fakeProfiles, startFakeHermes } from "./fake-hermes.ts";
+import { type FakeHermes, fakeProfiles, LONG_DESCRIPTION, startFakeHermes } from "./fake-hermes.ts";
 
 interface Rig {
   readonly chips: FakeChips;
@@ -1082,6 +1082,21 @@ describe("what it asks", () => {
     // What the command printed, not the JSON Hermes's terminal wraps it in.
     const ran = await sent(chips, "step.log", (event) => event.payload["status"] === "done");
     assert.equal(ran.payload["summary"], "12 passed");
+  });
+
+  it("cuts a long description short, keeping the question to the protocol's 200 characters", async () => {
+    const { chips } = await rig();
+    await chips.say("ask long");
+    const asked = await sent(chips, "approval.request");
+    const question = String(asked.payload["question"]);
+    assert.equal(question.length, 200);
+    assert.ok(question.startsWith("Allow it to run the tests and the benchmarks"));
+    assert.ok(question.endsWith("…?"));
+    // The whole description is still in the action.
+    assert.equal((asked.payload["action"] as { input: { description: string } }).input.description, LONG_DESCRIPTION);
+    await chips.decide(String(asked.payload["approval_id"]), "approved");
+    const words = await sent(chips, "message.post", (event) => event.run_id === asked.run_id);
+    assert.equal(words.payload["text"], "Given: once");
   });
 
   it("gives Hermes deny when a person says no", async () => {
