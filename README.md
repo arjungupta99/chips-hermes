@@ -218,7 +218,9 @@ the key it kept. The scratch Chips, the link and the run come from Chips's `tool
 ## Release
 
 `npm run release` builds `dist/main.js`, one file with the SDK and everything else bundled in, and
-`dist/THIRD-PARTY-NOTICES.md` beside it; runs the tests; and packs `chipschat-hermes-<version>.tgz`. `npm publish`
-publishes it. A version's major is the Chips protocol it speaks, and Chips's card names that major
-(Chips ADR 0218): a fix is a minor or a patch, and reaches every card of its major the day it is
-published.
+`dist/THIRD-PARTY-NOTICES.md` beside it; runs the tests; and packs `chipschat-hermes-<version>.tgz`. To publish,
+change `version` in package.json (`npm version <x> --no-git-tag-version`), commit, and push to main:
+`.github/workflows/publish.yml` runs the tests and publishes that version from GitHub with npm's
+trusted publishing, and skips a version npm already has. A version's major is the Chips protocol it
+speaks, and Chips's card names that major (Chips ADR 0218): a fix is a minor or a patch, and reaches
+every card of its major the day it is published.
