@@ -419,6 +419,8 @@ export class Bridge {
   private toldModels = false;
   /** While Hermes's gateway restarts (Chips ADR 0094), the health watch says nothing: the restart says how it went. */
   private held = false;
+  /** Restarts begun, so a health check asked before one, and answered after, is let go. */
+  private holds = 0;
   /** What went wrong in the last restart, said in place of the watch's own words while Hermes doesn't answer. */
   private why: string | undefined;
 
@@ -499,6 +501,7 @@ export class Bridge {
 
   /** Hold the health watch's words while Hermes's gateway restarts, and let them go after. */
   hold(held: boolean): void {
+    if (held && !this.held) this.holds += 1;
     this.held = held;
   }
 
@@ -1015,11 +1018,18 @@ export class Bridge {
     }
   }
 
-  /** Trouble while a profile's gateway doesn't answer, and fine once all do (ADR 0083); nothing while a restart runs. */
+  /**
+   * Trouble while a profile's gateway doesn't answer, and fine once all do (ADR 0083); nothing while
+   * a restart runs, nor answers to a check asked before one began, even one over by now: they are of
+   * the gateways before, and a failed restart's words would go.
+   */
   private async sayHowItIs(): Promise<void> {
     if (this.held) return;
-    for (const agent of this.agents) agent.up = await agent.client.healthy();
-    if (this.held) return;
+    const holds = this.holds;
+    const answers = new Map<Running, boolean>();
+    for (const agent of this.agents) answers.set(agent, await agent.client.healthy());
+    if (this.holds !== holds) return;
+    for (const [agent, up] of answers) agent.up = up;
     const down = this.agents.filter((agent) => !agent.up);
     if (down.length === 0) this.why = undefined;
     const chips = this.options.chips;

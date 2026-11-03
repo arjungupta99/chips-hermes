@@ -1234,6 +1234,30 @@ describe("its health", () => {
     await bridge.restarted(undefined);
     assert.equal(chips.statuses()[now]?.state, "ok");
   });
+
+  it("keeps a failed restart's words over a health check asked before it began", async () => {
+    const { chips, hermes, bridge } = await rig();
+    await until(() => chips.statuses().at(-1)?.state === "ok");
+    // A health check asked while Hermes answers, its answer held until the restart has failed.
+    let release = () => {};
+    hermes.held = new Promise((resolve) => (release = resolve));
+    const asked = hermes.healthAsked;
+    await until(() => hermes.healthAsked > asked);
+    const before = chips.statuses().length;
+    bridge.hold(true);
+    hermes.up = false;
+    await bridge.restarted("Hermes's gateway started, but nothing answers on port 8642.");
+    bridge.hold(false);
+    hermes.held = undefined;
+    release();
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    const after = chips.statuses().slice(before);
+    assert.ok(after.length > 1, "the watch speaks again");
+    assert.deepEqual(
+      [...new Set(after.map((status) => `${status.state}: ${status.reason}`))],
+      ["trouble: Hermes's gateway started, but nothing answers on port 8642."],
+    );
+  });
 });
 
 describe("its Restart (Chips ADR 0094)", () => {

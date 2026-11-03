@@ -86,6 +86,10 @@ export interface FakeHermes {
   /** The sessions ended, and why: `branched` for a fork's original. */
   readonly ended: Map<string, string>;
   up: boolean;
+  /** How many times `GET /health` was asked: the bridge's health checks among them. */
+  healthAsked: number;
+  /** While set, `GET /health` waits for it, then answers as Hermes was when asked. */
+  held: Promise<void> | undefined;
   /** The session compressed: it goes on under a new id with what it held. The new id. */
   compress(sessionId: string): string;
   /** Where Hermes's outbound webhook POSTs each profile's readings, and what it signs them with. */
@@ -145,6 +149,8 @@ export async function startFakeHermes(
     forks: [],
     ended: new Map(),
     up: true,
+    healthAsked: 0,
+    held: undefined,
     window: 200_000,
     delivered: [],
     optionsAsked: [],
@@ -365,7 +371,12 @@ export async function startFakeHermes(
   const server: Server = createServer((request, response) => {
     void (async () => {
       const url = new URL(request.url ?? "/", "http://fake");
-      if (url.pathname === "/health") return json(response, fake.up ? 200 : 503, { status: fake.up ? "ok" : "down" });
+      if (url.pathname === "/health") {
+        const up = fake.up;
+        fake.healthAsked += 1;
+        await fake.held;
+        return json(response, up ? 200 : 503, { status: up ? "ok" : "down" });
+      }
       const profiled = /^\/p\/([^/]+)(\/.*)$/.exec(url.pathname);
       const profile = profiled?.[1] ?? "default";
       const own = fake.root === undefined || profile === "default" ? undefined : envValue(profileHome(fake.root, profile), "API_SERVER_KEY");
