@@ -202,8 +202,8 @@ npm test
 They run the bridge against Chips's conformance fake and a scripted Hermes API server
 (`test/fake-hermes.ts`), on Hermes's own routes and event names, and its webhook's signed
 readings. That includes Chips's golden scenario. Hermes's own files are in temporary homes: no
-test reads or writes `~/.hermes`. The SDK and the kit are in `vendor/`, packed from a Chips checkout with
-`pnpm release:sdk <this repo>/vendor`.
+test reads or writes `~/.hermes`. The SDK and the kit come from npm, at the version `package.json`
+pins.
 
 ```
 npm run e2e
