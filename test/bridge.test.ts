@@ -210,6 +210,8 @@ describe("a space a person asks for from the + (Chips ADR 0241)", () => {
     assert.equal(started.payload["goal"], "Plan a weekend in Lisbon for two");
     const ran = hermes.started.at(-1);
     assert.match(ran?.input ?? "", /Plan a weekend in Lisbon for two$/);
+    // Told of the space on its first turn, as Chips wrote it for the harness (Chips ADR 0092's addendum).
+    assert.match(ran?.input ?? "", /In this space: .*and you, /);
     assert.equal(ran?.sessionId, state.sessions[`${agent.agentId}|${spaceId}`], "a session of its own");
   });
 

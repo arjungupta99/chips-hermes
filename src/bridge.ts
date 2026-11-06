@@ -56,6 +56,7 @@ import type {
   Speaker,
 } from "@chipschat/harness";
 import {
+  firstTurnOf,
   heldNote,
   overheardLine,
   promptFor,
@@ -870,15 +871,19 @@ export class Bridge {
     await this.ownProfile(agent.agentId, agent.name);
     this.ours.add(agent.agentId);
     void this.agentsMoved();
-    // Said to the agent as a message of the person's, under the first words' own id.
-    const message = {
-      type: "message.new",
-      space_id: spaceId,
-      message_id: firstMessage.messageId,
-      text: firstMessage.text,
-      from: { participant_id: asked.askedBy, kind: "person", display_name: await this.whoSaid(asked), role: "member" },
-      for: [agent.agentId],
-    } as unknown as MessageNew;
+    // Said to the agent as a message of the person's, under the first words' own id, with the
+    // room's note Chips wrote for the harness before the agent was made (Chips ADR 0092's
+    // addendum), or alone when they were read from the room's history.
+    const message =
+      firstTurnOf(asked, agent.agentId) ??
+      ({
+        type: "message.new",
+        space_id: spaceId,
+        message_id: firstMessage.messageId,
+        text: firstMessage.text,
+        from: { participant_id: asked.askedBy, kind: "person", display_name: await this.whoSaid(asked), role: "member" },
+        for: [agent.agentId],
+      } as unknown as MessageNew);
     void this.hear(message);
   }
 
