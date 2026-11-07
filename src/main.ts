@@ -3,7 +3,7 @@
  * Chips (`CHIPS_JOIN_LINK`), or with a code a person allows — and keeps its key; then it connects,
  * registers its agents, and answers for them through Hermes until it is stopped.
  *
- * The config is JSON, `~/.chips-hermes/config.json` unless a path is given:
+ * The config is JSON, `~/Chips/.bridges/hermes/config.json` unless a path is given:
  *
  *     { "url": "http://127.0.0.1:8642",
  *       "agents": [{ "name": "Hermes", "profile": "default", "keyEnv": "API_SERVER_KEY" }] }
@@ -12,7 +12,8 @@
  * multiplexes its profiles, or at a `url` of its own when each runs its own gateway. A key is read
  * from the environment variable `keyEnv` names, never written in the file. What it keeps is beside
  * the config: the SDK's state (cursor, unanswered events, runs not ended) and which session each
- * room is.
+ * room is. Each agent's folder is in `~/Chips/Agents/hermes`. An install from before 1.0.17, in
+ * `~/.chips-hermes` and `~/chips-hermes/agents`, is moved there first (`move.ts`, Chips ADR 0283).
  *
  * Each agent's page in Chips shows its context: the files Hermes builds it from, read under
  * `$HERMES_HOME` (else `~/.hermes`), and how full its context window is, which Hermes sends after
@@ -30,8 +31,7 @@
 import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
-import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join } from "node:path";
 import { checkGit, connect, fileStore, helloOnce, JoinError, join as joinChips, reportStep } from "@chipschat/harness";
 import { Bridge, type BridgeState, settingsFor, WANTS } from "./bridge.js";
 import { Gateways, gatewayLog, gatewaysOf, restarter, thisMachine } from "./gateway.js";
@@ -39,16 +39,20 @@ import { HermesClient } from "./hermes.js";
 import { hermesRoot, profileHome } from "./home.js";
 import { hookPortIn } from "./hooks.js";
 import { keepIfAsked, stopIfAsked, words } from "./keep.js";
+import { moveOld } from "./move.js";
+import { configPathOf, configTargetOf } from "./places.js";
 import { hermesProfiles } from "./profiles.js";
 import { type Config, checkedWords, checkHermes, readConfig, readyHooks, SetupError } from "./setup.js";
 import { VERSION } from "./version.js";
 
-const home = (path: string) => (path.startsWith("~/") ? join(homedir(), path.slice(2)) : path);
 const link = process.env["CHIPS_JOIN_LINK"] || undefined;
 
 const LABEL = "chat.chips.hermes";
 stopIfAsked(LABEL);
-const configPath = resolve(home(words[0] ?? "~/.chips-hermes/config.json"));
+const log = (line: string) => process.stdout.write(`${new Date().toISOString()} ${line}\n`);
+// What it kept before 1.0.17, brought across to ~/Chips first, so everything after reads it there.
+moveOld(configTargetOf(words[0]), log);
+const configPath = configPathOf(words[0]);
 // What it needs, checked before a link is taken up, which works once. Started without a link, a
 // bridge up before Hermes waits for it, and says so in Chips meanwhile.
 const folder = dirname(configPath);
@@ -60,7 +64,6 @@ const saveState = (next: BridgeState) => {
   mkdirSync(folder, { recursive: true, mode: 0o700 });
   writeFileSync(statePath, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });
 };
-const log = (line: string) => process.stdout.write(`${new Date().toISOString()} ${line}\n`);
 
 /** A port nothing listens on now, for Hermes's webhook the first time. */
 const freePort = () =>

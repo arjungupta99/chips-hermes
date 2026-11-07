@@ -13,6 +13,7 @@ import type { AgentConfig } from "./bridge.js";
 import { HermesClient } from "./hermes.js";
 import { profileHome, profileName } from "./home.js";
 import { addHook, type HookOutcome } from "./hooks.js";
+import { folderPathOf, placesOf } from "./places.js";
 
 export interface Config {
   readonly name?: string;
@@ -130,10 +131,10 @@ function fromHermes(name: string, env: NodeJS.ProcessEnv): string | undefined {
   return undefined;
 }
 
-/** A folder the config names, `~` at the home of the user the bridge runs as. */
+/** A folder the config names, `~` at the home of the user the bridge runs as, in the place it is now. */
 function folderOf(said: unknown): string | undefined {
   if (typeof said !== "string" || said === "") return undefined;
-  return resolve(said === "~" || said.startsWith("~/") ? homedir() + said.slice(1) : said);
+  return folderPathOf(said);
 }
 
 /** The config at `path`, each agent with its key from the environment. */
@@ -185,7 +186,7 @@ export function readConfig(path: string, env: NodeJS.ProcessEnv = process.env): 
   return {
     ...(typeof raw.name === "string" ? { name: raw.name } : {}),
     agents,
-    folders: folderOf(raw.folders) ?? resolve(homedir(), "chips-hermes", "agents"),
+    folders: folderOf(raw.folders) ?? placesOf().agents,
     ...(typeof hookPort === "number" && Number.isInteger(hookPort) && hookPort > 0 && hookPort < 65536 ? { hookPort } : {}),
   };
 }

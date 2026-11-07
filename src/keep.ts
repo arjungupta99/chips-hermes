@@ -10,18 +10,21 @@
  * stops it (`CHIPS_STOP_COMMAND`, `chips disconnect <id>`).
  */
 
-import { homedir } from "node:os";
-import { basename, join, resolve } from "node:path";
+import { basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { keepEnvironment, keepRunning, keptNode, stopKeeping } from "@chipschat/harness";
+import { configPathOf } from "./places.js";
 
 const flags = process.argv.slice(2);
 
 /** The words that aren't flags: the config's path, where one is given. */
 export const words = flags.filter((word) => !word.startsWith("--"));
 
-/** A word as a whole path, for the kept copy, which runs from elsewhere. */
-const whole = (word: string) => resolve(word.startsWith("~/") ? join(homedir(), word.slice(2)) : word);
+/**
+ * A word as a whole path, for the kept copy, which runs from elsewhere: a config named in the old
+ * place is kept with its path now (Chips ADR 0283).
+ */
+const whole = (word: string) => configPathOf(word);
 
 /** This repository, or the installed package, where the kept bridge runs from. */
 const here = fileURLToPath(new URL("..", import.meta.url)).replace(/\/$/, "");

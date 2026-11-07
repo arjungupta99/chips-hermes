@@ -152,10 +152,17 @@ point (the one the `hermes` wrapper runs) directly, with the wrapper's variables
 `DYLD_LIBRARY_PATH=/opt/homebrew/opt/expat/lib`, which macOS would drop at the wrapper, and its log
 says so.
 
-**Folders.** Each agent gets a folder of its own, `~/chips-hermes/agents/<its name>`, made the
+**Folders.** Each agent gets a folder of its own, `~/Chips/Agents/hermes/<its name>`, made the
 first time it is spoken to and kept by its Chips agent after a rename. Each run tells the agent it
 is its folder, in the run's `instructions`. The files an answer sends go to the room from there and
 from nowhere else.
+
+Everything the bridge keeps is under `~/Chips` (Chips ADR 0283): its config, sessions and state in
+`~/Chips/.bridges/hermes`, the agents' folders in `~/Chips/Agents/hermes`. Until 1.0.17 they were
+`~/.chips-hermes` and `~/chips-hermes/agents`. The first start of 1.0.17 moves them, and the folder
+paths its sessions saved. It renames and never copies; where something is at the new place already
+it moves in what isn't there yet and says in its log what it left. A file in `~/chips-hermes` it
+didn't make stays there.
 
 **Each new agent, a profile of its own.** An agent made in Chips (Add, then a new one, or a
 space from the +) gets a Hermes profile, made by Hermes with
@@ -172,7 +179,7 @@ space from the +) gets a Hermes profile, made by Hermes with
 The profile is named after the agent when it is made, in lowercase letters, digits and `-`
 (`nova`, `nova-2` when Hermes has a `nova` already), and keeps that name after a rename, as the
 agent's folder does. Deleting the agent in Chips leaves its profile in Hermes: what it learned is
-yours to delete, with `hermes profile delete <name>`. `~/.chips-hermes/sessions.json` remembers
+yours to delete, with `hermes profile delete <name>`. `~/Chips/.bridges/hermes/sessions.json` remembers
 which profile is whose.
 
 The one gateway serves every profile under `/p/<name>`, and takes a new one at once when the bridge
@@ -183,7 +190,7 @@ on it serves every profile. Hermes's gateway also keeps sending a new profile's 
 Main agent's address until it starts again, which the bridge drops. Where Hermes doesn't make a
 profile, the agent runs on the first profile, in a session of its own, and the log says why.
 
-**More than one agent.** Name them in `~/.chips-hermes/config.json` (see `config.example.json`).
+**More than one agent.** Name them in `~/Chips/.bridges/hermes/config.json` (see `config.example.json`).
 Each agent is one of three:
 - the default profile;
 - a profile under `/p/<profile>`, with `gateway.multiplex_profiles` on and that profile's own key;

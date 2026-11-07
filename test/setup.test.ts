@@ -30,7 +30,7 @@ describe("before the link is taken up", () => {
       read.agents.map((agent) => [agent.name, agent.address.profile, agent.address.url]),
       [["Hermes", "default", "http://127.0.0.1:8642"]],
     );
-    assert.equal(read.folders, join(homedir(), "chips-hermes", "agents"));
+    assert.equal(read.folders, join(homedir(), "Chips", "Agents", "hermes"));
   });
 
   it("stops on a key left as the command's placeholder, or not set, saying how to turn the API server on", () => {
