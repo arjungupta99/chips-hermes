@@ -186,7 +186,7 @@ export function readConfig(path: string, env: NodeJS.ProcessEnv = process.env): 
   return {
     ...(typeof raw.name === "string" ? { name: raw.name } : {}),
     agents,
-    folders: folderOf(raw.folders) ?? placesOf().agents,
+    folders: folderOf(raw.folders) ?? folderPathOf(placesOf().agents),
     ...(typeof hookPort === "number" && Number.isInteger(hookPort) && hookPort > 0 && hookPort < 65536 ? { hookPort } : {}),
   };
 }

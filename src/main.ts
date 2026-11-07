@@ -38,7 +38,7 @@ import { Gateways, gatewayLog, gatewaysOf, restarter, thisMachine } from "./gate
 import { HermesClient } from "./hermes.js";
 import { hermesRoot, profileHome } from "./home.js";
 import { hookPortIn } from "./hooks.js";
-import { keepIfAsked, stopIfAsked, words } from "./keep.js";
+import { handsOver, keepIfAsked, stopIfAsked, words } from "./keep.js";
 import { moveOld } from "./move.js";
 import { configPathOf, configTargetOf } from "./places.js";
 import { hermesProfiles } from "./profiles.js";
@@ -50,8 +50,9 @@ const link = process.env["CHIPS_JOIN_LINK"] || undefined;
 const LABEL = "chat.chips.hermes";
 stopIfAsked(LABEL);
 const log = (line: string) => process.stdout.write(`${new Date().toISOString()} ${line}\n`);
-// What it kept before 1.0.17, brought across to ~/Chips first, so everything after reads it there.
-moveOld(configTargetOf(words[0]), log);
+// What it kept before 1.0.17, brought across to ~/Chips first, so everything after reads it
+// there; by the kept copy, where this run hands over to one (`handsOver`).
+if (!handsOver) moveOld(configTargetOf(words[0]), log);
 const configPath = configPathOf(words[0]);
 // What it needs, checked before a link is taken up, which works once. Started without a link, a
 // bridge up before Hermes waits for it, and says so in Chips meanwhile.

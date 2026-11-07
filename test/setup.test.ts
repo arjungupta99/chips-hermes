@@ -18,6 +18,8 @@ writeFileSync(config, JSON.stringify({ agents: [{ name: "Hermes", profile: "defa
 // Hermes's own settings, kept apart from this Mac's: a test never reads the real ~/.hermes/.env.
 const hermesHome = mkdtempSync(join(tmpdir(), "chips-hermes-home-"));
 const noHermes = { HERMES_HOME: mkdtempSync(join(tmpdir(), "chips-hermes-none-")) };
+// A home of the test's own: where the agents' folders go by default depends on what is in it.
+process.env["HOME"] = mkdtempSync(join(tmpdir(), "chips-hermes-home-"));
 
 const stopsWith = (pattern: RegExp) => (error: unknown) =>
   error instanceof SetupError && pattern.test(error.message) && error.message.includes(STILL_GOOD);

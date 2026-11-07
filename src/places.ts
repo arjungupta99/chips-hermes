@@ -80,5 +80,10 @@ export function configPathOf(word: string | undefined, home: string = homedir())
 /** A folder a config names, as a whole path in the place it is now. */
 export function folderPathOf(path: string, home: string = homedir()): string {
   const places = placesOf(home);
-  return nowAt(resolve(fromHome(path, home)), places.oldAgents, places.agents);
+  const whole = resolve(fromHome(path, home));
+  // A folder in the new place is still the old one while only the old one is there.
+  const under = inside(places.agents, whole);
+  const old = under === undefined ? undefined : join(places.oldAgents, under);
+  if (old !== undefined && existsSync(old) && !existsSync(whole)) return old;
+  return nowAt(whole, places.oldAgents, places.agents);
 }

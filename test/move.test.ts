@@ -56,6 +56,11 @@ describe("where things are kept", () => {
     put("Chips/.bridges/hermes/config.json", JSON.stringify({ agents: [{ name: "Hermes", profile: "default" }] }));
     assert.equal(readConfig(at("Chips/.bridges/hermes/config.json"), { API_SERVER_KEY: "k" }).folders, at("Chips/Agents/hermes"));
   });
+  it("keeps the agents' folders where they were until they move", () => {
+    put("Chips/.bridges/hermes/config.json", JSON.stringify({ agents: [{ name: "Hermes", profile: "default" }] }));
+    put("chips-hermes/agents/fern/notes.txt", "Fern's\n");
+    assert.equal(readConfig(at("Chips/.bridges/hermes/config.json"), { API_SERVER_KEY: "k" }).folders, at("chips-hermes/agents"));
+  });
 });
 
 describe("an install from before 1.0.17", () => {

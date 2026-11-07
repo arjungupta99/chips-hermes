@@ -13,7 +13,7 @@
 import { basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { keepEnvironment, keepRunning, keptNode, stopKeeping } from "@chipschat/harness";
-import { configPathOf } from "./places.js";
+import { configTargetOf } from "./places.js";
 
 const flags = process.argv.slice(2);
 
@@ -21,10 +21,17 @@ const flags = process.argv.slice(2);
 export const words = flags.filter((word) => !word.startsWith("--"));
 
 /**
- * A word as a whole path, for the kept copy, which runs from elsewhere: a config named in the old
- * place is kept with its path now (Chips ADR 0283).
+ * Whether this run hands over to a copy kept running (`--keep`). It moves nothing of an install from
+ * before (Chips ADR 0283): the kept copy does, once the one it replaces has stopped, so nothing that
+ * one writes as it stops is left in the old place.
  */
-const whole = (word: string) => configPathOf(word);
+export const handsOver = flags.includes("--keep");
+
+/**
+ * A word as a whole path, for the kept copy, which runs from elsewhere: a config named in the old
+ * place is kept with its path in the new one, where the kept copy moves it (Chips ADR 0283).
+ */
+const whole = (word: string) => configTargetOf(word);
 
 /** This repository, or the installed package, where the kept bridge runs from. */
 const here = fileURLToPath(new URL("..", import.meta.url)).replace(/\/$/, "");
