@@ -10,7 +10,7 @@
 
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 export interface Places {
   /** `~/Chips/.bridges/hermes`: the config, the sessions, the SDK's state. */
@@ -67,14 +67,15 @@ export function configTargetOf(word: string | undefined, home: string = homedir(
 
 /**
  * The config, named by a word or the default, as a whole path in the place it is now: the new place,
- * unless its file is still in the old one and not yet in the new.
+ * unless the folder it is kept in is still in the old one and not yet in the new. The folder, not the
+ * file, which the default config needn't be.
  */
 export function configPathOf(word: string | undefined, home: string = homedir()): string {
   const places = placesOf(home);
   const target = configTargetOf(word, home);
   const under = inside(places.settings, target);
   const old = under === undefined ? undefined : join(places.oldSettings, under);
-  return old !== undefined && existsSync(old) && !existsSync(target) ? old : target;
+  return old !== undefined && existsSync(dirname(old)) && !existsSync(dirname(target)) ? old : target;
 }
 
 /** A folder a config names, as a whole path in the place it is now. */

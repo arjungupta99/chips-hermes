@@ -52,6 +52,11 @@ describe("where things are kept", () => {
     assert.equal(configPathOf(undefined, home), at(".chips-hermes/config.json"));
   });
 
+  it("uses the old place while its folder is there, with no config in it", () => {
+    put(".chips-hermes/sessions.json", "{}");
+    assert.equal(configPathOf(undefined, home), at(".chips-hermes/config.json"));
+  });
+
   it("gives the agents their folders in ~/Chips/Agents/hermes", () => {
     put("Chips/.bridges/hermes/config.json", JSON.stringify({ agents: [{ name: "Hermes", profile: "default" }] }));
     assert.equal(readConfig(at("Chips/.bridges/hermes/config.json"), { API_SERVER_KEY: "k" }).folders, at("Chips/Agents/hermes"));
