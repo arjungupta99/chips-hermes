@@ -5,9 +5,9 @@
  * what to do, and the link is still good for the same command run again.
  */
 
-import { existsSync, readFileSync } from "node:fs";
+import { accessSync, constants, existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { delimiter, join, resolve } from "node:path";
 import { filledIn, type StopWords } from "@chipschat/harness";
 import type { AgentConfig } from "./bridge.js";
 import { HermesClient } from "./hermes.js";
@@ -131,6 +131,22 @@ function fromHermes(name: string, env: NodeJS.ProcessEnv): string | undefined {
   return undefined;
 }
 
+/** The line Hermes's own docs give to install it. */
+const INSTALL = "curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash";
+
+/** Whether `hermes` is on this PATH. */
+function hermesOnPath(env: NodeJS.ProcessEnv): boolean {
+  return (env["PATH"] ?? "").split(delimiter).some((dir) => {
+    if (dir === "") return false;
+    try {
+      accessSync(join(dir, "hermes"), constants.X_OK);
+      return true;
+    } catch {
+      return false;
+    }
+  });
+}
+
 /** A folder the config names, `~` at the home of the user the bridge runs as, in the place it is now. */
 function folderOf(said: unknown): string | undefined {
   if (typeof said !== "string" || said === "") return undefined;
@@ -160,6 +176,16 @@ export function readConfig(path: string, env: NodeJS.ProcessEnv = process.env): 
     const own = folderOf(agent["folder"]) ?? folder;
     if (typeof agent["name"] !== "string") throw new SetupError(`Each agent in ${path} has a name. ${STILL_GOOD}`);
     if (!filledIn(key)) {
+      // Nothing written down and no Hermes to be found: the first thing to do is install it. A
+      // config, or Hermes's own file, says it is somewhere, and the key is what's missing.
+      if (!existsSync(path) && !existsSync(hermesEnvPath(env)) && !hermesOnPath(env)) {
+        throw new SetupError(`Hermes isn't installed on this machine: run \`${INSTALL}\`, then \`hermes setup\`. ${STILL_GOOD}`, {
+          detail: "Hermes isn't on this Mac",
+          says: "Hermes isn't installed on this Mac.",
+          doing: "Run this in Terminal, then run hermes setup and try again.",
+          copy: INSTALL,
+        });
+      }
       throw new SetupError(
         `${agent["name"]}'s key isn't in $${keyEnv} or ${hermesEnvPath(env)}. Turn on Hermes's API server: add API_SERVER_ENABLED=true and API_SERVER_KEY=<a long random key> to ${hermesEnvPath(env)}, and start \`hermes gateway\` again. ${STILL_GOOD}`,
         {

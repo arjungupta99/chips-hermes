@@ -43,6 +43,31 @@ describe("before the link is taken up", () => {
     assert.throws(() => readConfig(config, noHermes), stopsWith(/key isn't in/));
   });
 
+  it("says Hermes isn't installed, with its own line, only when nothing says it is", () => {
+    const none = join(folder, "not-there.json");
+    const bin = mkdtempSync(join(tmpdir(), "chips-hermes-bin-"));
+    const words = (env: NodeJS.ProcessEnv, path = none) => {
+      try {
+        readConfig(path, env);
+      } catch (error) {
+        assert.ok(error instanceof SetupError);
+        assert.ok(error.message.includes(STILL_GOOD));
+        return error.words;
+      }
+      return undefined;
+    };
+    assert.deepEqual(words({ ...noHermes, PATH: bin }), {
+      detail: "Hermes isn't on this Mac",
+      says: "Hermes isn't installed on this Mac.",
+      doing: "Run this in Terminal, then run hermes setup and try again.",
+      copy: "curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash",
+    });
+    // A config of its own may name a Hermes somewhere else: there the key is what's missing.
+    assert.equal(words({ ...noHermes, PATH: bin }, config)?.says, "Hermes's API server isn't set up.");
+    writeFileSync(join(bin, "hermes"), "#!/bin/sh\n", { mode: 0o755 });
+    assert.equal(words({ ...noHermes, PATH: bin })?.says, "Hermes's API server isn't set up.");
+  });
+
   it("reads the key from Hermes's own settings when the environment doesn't give it", () => {
     writeFileSync(join(hermesHome, ".env"), 'API_SERVER_ENABLED=true\nAPI_SERVER_KEY="hk-from-hermes"\n');
     assert.equal(readConfig(config, { HERMES_HOME: hermesHome }).agents[0]?.address.key, "hk-from-hermes");
