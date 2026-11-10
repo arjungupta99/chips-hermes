@@ -104,14 +104,22 @@ first. The steps below run the bridge from this checkout instead, to work on it.
 2. Once, in this repository: `npm install`.
 
 3. Join Chips once, with a link from Chips's gallery (Agents → Connect a harness → Hermes), whose card gives
-   this line with the link in it:
+   the line with the link in it. On the computer Chips runs on, Chips for Mac runs it for you, or
+   in Terminal:
 
    ```
-   cd chips-hermes && CHIPS_JOIN_LINK='<link>' npm run keep
+   chips connect hermes '<link>'
    ```
 
-   `npm run keep` joins, then keeps the bridge running from login (below); `npm start` is the
-   same in the terminal only.
+   On another computer it is Chips's installer, which installs Chips there first if it has none:
+
+   ```
+   curl -fsSL https://chipschat.ai/install | CHIPS_JOIN_LINK='<link>' sh -s -- connect hermes
+   ```
+
+   Either fetches this bridge from npm (`@chipschat/hermes`), joins, and keeps it running from
+   login (below). From a checkout of this repository, for working on the bridge, it is
+   `CHIPS_JOIN_LINK='<link>' npm run keep`; `npm start` is the same in the terminal only.
 
    Or with `CHIPS_URL` and a code a person allows. Before it takes the link up, which works once,
    it checks there is a key, and that Hermes answers and takes it (`/v1/models`, since `/health`
