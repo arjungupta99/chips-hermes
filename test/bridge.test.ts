@@ -662,7 +662,8 @@ describe("the files an answer names", () => {
     await chips.say("two");
     await chips.waitFor((event) => (event.type === "run.completed" && hermes.started.length === 2 ? event : undefined), 3000);
     for (const run of hermes.started) {
-      assert.match(run.instructions ?? "", /\n\nEveryone here reads what you write\.$/);
+      // The room's rules come last; the SDK says more after this sentence since 1.0.3 (ADR 0287).
+      assert.match(run.instructions ?? "", /\n\nEveryone here reads what you write\. [^\n]*$/);
       assert.doesNotMatch(run.input ?? "", /Everyone here reads what you write/);
       assert.match(run.input ?? "", /^In this space:/);
     }
