@@ -134,6 +134,15 @@ function fromHermes(name: string, env: NodeJS.ProcessEnv): string | undefined {
 /** The line Hermes's own docs give to install it. */
 const INSTALL = "curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash";
 
+/**
+ * The line that turns on Hermes's API server, to copy: both settings added to Hermes's own `.env`,
+ * the key a random one. They were two hand edits with nothing to copy (Chips's onboarding audit,
+ * Part 2, item 22).
+ */
+export function serverOnLine(path: string): string {
+  return `printf '\\nAPI_SERVER_ENABLED=true\\nAPI_SERVER_KEY=%s\\n' "$(openssl rand -hex 32)" >> '${path.replace(/'/g, "'\\''")}'`;
+}
+
 /** Whether `hermes` is on this PATH. */
 function hermesOnPath(env: NodeJS.ProcessEnv): boolean {
   return (env["PATH"] ?? "").split(delimiter).some((dir) => {
@@ -191,7 +200,8 @@ export function readConfig(path: string, env: NodeJS.ProcessEnv = process.env): 
         {
           detail: "No key for its API server",
           says: "Hermes's API server isn't set up.",
-          doing: `Add API_SERVER_ENABLED=true and an API_SERVER_KEY, a long random key, to ${shown(hermesEnvPath(env))}. Then start Hermes with hermes gateway.`,
+          doing: `Run this in Terminal to turn it on in ${shown(hermesEnvPath(env))}, then start Hermes again with hermes gateway and try again.`,
+          copy: serverOnLine(hermesEnvPath(env)),
         },
       );
     }

@@ -5,11 +5,12 @@
  */
 
 import { strict as assert } from "node:assert";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
-import { checkedWords, checkHermes, readConfig, SetupError, STILL_GOOD } from "../src/setup.ts";
+import { checkedWords, checkHermes, readConfig, SetupError, STILL_GOOD, serverOnLine } from "../src/setup.ts";
 
 const folder = mkdtempSync(join(tmpdir(), "chips-hermes-setup-"));
 const config = join(folder, "config.json");
@@ -66,6 +67,26 @@ describe("before the link is taken up", () => {
     assert.equal(words({ ...noHermes, PATH: bin }, config)?.says, "Hermes's API server isn't set up.");
     writeFileSync(join(bin, "hermes"), "#!/bin/sh\n", { mode: 0o755 });
     assert.equal(words({ ...noHermes, PATH: bin })?.says, "Hermes's API server isn't set up.");
+  });
+
+  it("gives a line to copy that turns on Hermes's API server, which then has a key", () => {
+    const home = mkdtempSync(join(tmpdir(), "chips-hermes-home-"));
+    // A .env that doesn't end its last line: the line starts one of its own.
+    writeFileSync(join(home, ".env"), "OPENAI_API_KEY=sk-1");
+    const env = { ...noHermes, HERMES_HOME: home };
+    const words = (() => {
+      try {
+        readConfig(config, env);
+      } catch (error) {
+        return error instanceof SetupError ? error.words : undefined;
+      }
+      return undefined;
+    })();
+    assert.equal(words?.copy, serverOnLine(join(home, ".env")));
+    execFileSync("sh", ["-c", serverOnLine(join(home, ".env"))]);
+    const key = readConfig(config, env).agents[0]?.address.key;
+    assert.match(key ?? "", /^[0-9a-f]{64}$/);
+    assert.match(readFileSync(join(home, ".env"), "utf8"), /^OPENAI_API_KEY=sk-1\nAPI_SERVER_ENABLED=true\nAPI_SERVER_KEY=/);
   });
 
   it("reads the key from Hermes's own settings when the environment doesn't give it", () => {
