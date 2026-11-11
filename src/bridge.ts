@@ -45,6 +45,7 @@
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import type {
+  Ack,
   Agent,
   AgentContextCopy,
   AgentContextWindowCopy,
@@ -71,6 +72,7 @@ import {
 } from "@chipschat/harness";
 import {
   type AgentAsked,
+  type AgentAttached,
   type AgentFork,
   type ContextEditFrame,
   createIdGenerator,
@@ -81,6 +83,7 @@ import {
   messageIdOf,
   type ModelChangeFrame,
   type ProjectFacts,
+  type RoomContext,
   renderAttachment,
   type StepKind,
   type WindowChangeFrame,
@@ -424,7 +427,15 @@ interface Room {
    * goes is sent with them among the lines since, and its turn leaves them out (Chips ADR 0294).
    */
   readonly answered: string[];
+  /**
+   * What Chips answered when it held the agent's last words here from the agents they named (Chips
+   * ADR 0097): its next turn in the room is told, first.
+   */
+  heldPost?: Pick<Ack, "held" | "exchange"> | undefined;
 }
+
+/** How many rooms' lines from before an agent joined are kept for its first turn there. */
+const SAID_BEFORE_MOST = 200;
 
 /** An approval Hermes asked for, and whether the answer came from here. */
 interface Pending {
@@ -485,6 +496,11 @@ export class Bridge {
   private readonly rooms = new Map<string, Room>();
   /** What is said in the rooms is taken in the order it came: a message, then what was overheard after it. */
   private arriving: Promise<unknown> = Promise.resolve();
+  /**
+   * What was said in a room before one of its agents joined it (Chips ADR 0088), by the agent and
+   * the room: said at the agent's first turn there, and kept no longer.
+   */
+  private readonly saidBefore = new Map<string, Pick<RoomContext, "lines">>();
   /** The turns going, by their Chips run, for what is said in their rooms while they work (Chips ADR 0106). */
   private readonly working = new Map<string, Turn>();
   /** Every Chips agent of the harness's, configured here or not. */
@@ -592,7 +608,10 @@ export class Bridge {
       this.notRight(feedback).catch((error: unknown) => this.log(`a note on a reply went wrong: ${messageOf(error)}`));
     });
     // An agent put in a room or taken out may be one made, archived or deleted: who reads what moves.
-    chips.on("agent.attached", () => void this.agentsMoved());
+    chips.on("agent.attached", (attached) => {
+      this.attached(attached);
+      void this.agentsMoved();
+    });
     chips.on("agent.released", () => void this.agentsMoved());
     await this.sayHowItIs();
     this.health = setInterval(() => void this.sayHowItIs(), this.options.healthEveryMs ?? 30_000);
@@ -1344,6 +1363,20 @@ export class Bridge {
    * One turn on what waited (Chips ADR 0294): the newest message's, whose note and lines it is
    * handed, with those that waited ahead of it said in full, and what was said after to others.
    */
+  /**
+   * One of its agents put in a room (Chips ADR 0088): the room's last lines before it joined come
+   * with the news, and are kept for the agent's first turn there, which says them once.
+   */
+  private attached(attached: AgentAttached): void {
+    const { agent_id: agentId, space_id: spaceId, catch_up: before } = attached;
+    if (spaceId === undefined || before === undefined || before.lines.length === 0) return;
+    this.saidBefore.set(`${agentId}|${spaceId}`, before);
+    for (const oldest of this.saidBefore.keys()) {
+      if (this.saidBefore.size <= SAID_BEFORE_MOST) break;
+      this.saidBefore.delete(oldest);
+    }
+  }
+
   private async turn(room: Room, waiting: readonly Asked[]): Promise<void> {
     const { message, speakerId, goal } = waiting.at(-1) as Asked;
     const { agent, spaceId } = room;
@@ -1429,6 +1462,8 @@ export class Bridge {
     turn.folder = this.folderOf(agent, speakerId ?? agent.agentId, name);
     const project = await this.projectFor(turn, room.spaceId, speakerId ?? agent.agentId, name);
     turn.rules = rulesFor(message, { taker: speakerId, project });
+    // What was said before the agent joined, at its first turn here; and that Chips held its last words.
+    const joined = `${turn.who}|${room.spaceId}`;
     let text: string | undefined = promptForAll(message, {
       taker: speakerId,
       sayWho,
@@ -1437,13 +1472,19 @@ export class Bridge {
       earlier,
       since,
       answered: room.answered,
+      before: this.saidBefore.get(joined),
+      heldPost: room.heldPost,
     });
     if (earlier.length > 0) this.log(`${agent.config.name} takes ${waiting.length} messages that waited in ${room.spaceId} as one turn`);
     for (let round = 0; text !== undefined && !turn.cancelled && !run.over; round += 1) {
       if (!(await this.resumed(turn))) return;
       const last = await this.once(turn, session, text, `${run.id}:${round}`);
       // Its session holds them once Hermes has run on them, however the turn goes on from here.
-      if (round === 0 && last !== undefined) keepAnswered(room.answered, [...earlier, message]);
+      if (round === 0 && last !== undefined) {
+        keepAnswered(room.answered, [...earlier, message]);
+        this.saidBefore.delete(joined);
+        room.heldPost = undefined;
+      }
       await this.settleJoined(turn, room, last);
       if (last === undefined) return;
       const paused = turn.pausing;
@@ -1463,7 +1504,7 @@ export class Bridge {
         return;
       }
       text = turn.next.shift();
-      if (text === undefined) await this.finish(turn, last);
+      if (text === undefined) await this.finish(turn, room, last);
     }
   }
 
@@ -1821,7 +1862,7 @@ export class Bridge {
   // ------------------------------------------------------------------ the end
 
   /** The turn is over: its words in the room, its tokens, and the run ended. */
-  private async finish(turn: Turn, last: RunEvent): Promise<void> {
+  private async finish(turn: Turn, room: Room, last: RunEvent): Promise<void> {
     const { run, agent } = turn;
     if (run.over) return;
     await this.closeSteps(turn, "done");
@@ -1843,7 +1884,12 @@ export class Bridge {
     });
     const reply = post.text;
     if (reply !== "" || post.uploadIds.length > 0) {
-      await turn.speaker.post({ spaceId: run.spaceId, runId: run.id, text: reply, uploadIds: post.uploadIds, change });
+      const taken = await turn.speaker.post({ spaceId: run.spaceId, runId: run.id, text: reply, uploadIds: post.uploadIds, change });
+      // Chips held it from the agents it named (Chips ADR 0097): the agent's next turn here is told.
+      if (taken.held === true) {
+        room.heldPost = { held: true, ...(taken.exchange === undefined ? {} : { exchange: taken.exchange }) };
+        this.log(`Chips held what ${agent.config.name} said in ${room.spaceId} from the agents it named`);
+      }
     }
     const said = post.summary;
     const summary = said === "" ? "Done." : said.length <= 2000 ? said : `${said.slice(0, 1990)}…`;

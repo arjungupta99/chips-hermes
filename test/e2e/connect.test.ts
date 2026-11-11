@@ -28,13 +28,22 @@ describe("Hermes's card, from a link to its hello", { skip, timeout: 180_000 }, 
       (record) => JSON.parse(record) as { harnessId: string; hello: string },
     );
   const hellos = async (spaceId: string) => (await chips.said(spaceId)).filter((each) => HELLO.test(each.text));
-  /** The command run to its end: what not being set up stops it with. */
+  /**
+   * The command run to its end: what not being set up stops it with. One that goes on instead (it
+   * found nothing to stop for, and joined) fails here within a minute and is stopped, so no bridge
+   * is left running to hold the test open.
+   */
   const stopped = async (command: string, says: RegExp) => {
     const run = chips.run(command, { folder: here, home });
-    assert.equal(await run.exited, 1, run.output());
-    assert.match(run.output(), says);
-    assert.ok(run.output().includes(STILL_GOOD), run.output());
-    assert.equal((await chips.request(card.requestId)).state, "allowed", "the link is still good");
+    try {
+      const still = new Promise<"still running">((done) => setTimeout(done, 60_000, "still running").unref());
+      assert.equal(await Promise.race([run.exited, still]), 1, run.output());
+      assert.match(run.output(), says);
+      assert.ok(run.output().includes(STILL_GOOD), run.output());
+      assert.equal((await chips.request(card.requestId)).state, "allowed", "the link is still good");
+    } finally {
+      await run.stop();
+    }
   };
 
   before(async () => {
@@ -51,10 +60,11 @@ describe("Hermes's card, from a link to its hello", { skip, timeout: 180_000 }, 
   it("stops on each thing not set up, and leaves the link good", async () => {
     // No config is Hermes's default profile; its key is the API server's, from Hermes's own .env.
     await stopped(card.command, /Hermes's key isn't in \$API_SERVER_KEY or .*\.hermes\/\.env\. Turn on Hermes's API server/);
-    // Pointed at the fake Hermes, which the default profile's port isn't.
-    mkdirSync(join(home, ".chips-hermes"));
+    // Pointed at the fake Hermes, which the default profile's port isn't. The config is where the
+    // bridge reads it now (Chips ADR 0283), not `~/.chips-hermes`, where it was before.
+    mkdirSync(join(home, "Chips", ".bridges", "hermes"), { recursive: true });
     writeFileSync(
-      join(home, ".chips-hermes", "config.json"),
+      join(home, "Chips", ".bridges", "hermes", "config.json"),
       JSON.stringify({ url: hermes.url, agents: [{ name: "Hermes", profile: "default", keyEnv: "API_SERVER_KEY" }] }),
     );
     mkdirSync(join(home, ".hermes"));

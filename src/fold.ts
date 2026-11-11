@@ -5,17 +5,23 @@
  * note and the lines said since; the messages that waited ahead of it are said in full before its
  * words, and what was said in the room after, to others, is said last.
  *
+ * And what a turn is told of its agent's place in the room: the lines said before the agent joined
+ * (`before`, Chips ADR 0088), once, at its first turn there, and that Chips held its last message
+ * from the agents it named (`heldPost`, Chips ADR 0097).
+ *
  * The Chips SDK words this itself from 1.0.5: `promptFor(message, { earlier, since })`. This is the
  * same text on the SDK this bridge is built on, 1.0.4, and goes when the bridge moves to 1.0.5.
  */
 
-import { type PromptOptions, promptFor } from "@chipschat/harness";
+import { type Ack, type PromptOptions, promptFor } from "@chipschat/harness";
 import {
   CONTEXT_BUDGET,
   type ContextLine,
   type MessageNew,
   type MessageOverheard,
+  type RoomContext,
   renderAttachment,
+  renderContext,
   renderLine,
   renderReplyingTo,
   withRole,
@@ -34,6 +40,27 @@ export interface Waited {
   readonly answered?: readonly string[] | undefined;
   /** What was said in the room to others after this message arrived, oldest first. */
   readonly since?: readonly Heard[] | undefined;
+  /** The room's last lines before the agent joined it (`agent.attached`'s `catch_up`): said once, at its first turn there. */
+  readonly before?: Pick<RoomContext, "lines"> | undefined;
+  /** What `post` answered when Chips held the agent's last message in the room: said first, as Chips's word. */
+  readonly heldPost?: Pick<Ack, "held" | "exchange"> | undefined;
+}
+
+/** What an agent is told when Chips held its last message in the room (Chips ADR 0097), from what `post` answered. */
+export function heldWords(answer: Pick<Ack, "held" | "exchange"> | undefined): string | undefined {
+  if (answer?.held !== true) return undefined;
+  const count = answer.exchange?.count;
+  const since = typeof count === "number" && count > 0 ? ` (they have sent each other ${count} since a person last acted)` : "";
+  return `Your last message in this space was held, so the agents it named do not have it yet: messages between the agents here are held${since} until a person acts. Until then, tell the person what is done and what is blocked, rather than asking the agents again.`;
+}
+
+export const BEFORE_HEADING = "Said in this space before you joined:";
+
+/** What was said in the room before the agent joined, without what this turn says as a message. */
+function beforeOf(message: MessageNew, earlier: readonly MessageNew[], before: Waited["before"]): string | undefined {
+  const said = new Set([message.message_id, ...earlier.map((each) => each.message_id)]);
+  const lines = (before?.lines ?? []).filter((line) => line.message_id === undefined || !said.has(line.message_id));
+  return lines.length === 0 ? undefined : [BEFORE_HEADING, ...lines.map(renderLine)].join("\n");
 }
 
 /** Whether a message may share a turn with others: not one Chips handed over, whose note is about it alone. */
@@ -117,10 +144,16 @@ function contextOf(message: MessageNew, earlier: readonly MessageNew[], answered
 
 /** The turn's text for this message and those that waited ahead of it: `promptFor`, from the SDK's 1.0.5. */
 export function promptForAll(message: MessageNew, options: PromptOptions & Waited = {}): string {
-  const { earlier = [], since = [], answered = [], ...rest } = options;
-  if (earlier.length === 0 && since.length === 0 && answered.length === 0) return promptFor(message, rest);
+  const { earlier = [], since = [], answered = [], before, heldPost, ...rest } = options;
+  const held = heldWords(heldPost);
+  const joinedBefore = beforeOf(message, earlier, before);
+  if (earlier.length === 0 && since.length === 0 && answered.length === 0 && held === undefined && joinedBefore === undefined) {
+    return promptFor(message, rest);
+  }
   const taker = rest.taker ?? (message.for?.length === 1 ? message.for[0] : undefined);
   const text = [
+    joinedBefore,
+    renderContext(contextOf(message, earlier, answered)),
     earlier.length === 0 ? undefined : waitedWords(earlier.length + 1),
     ...earlier.flatMap((each) => saidOf(each, rest, taker)),
     ...saidOf(message, rest, taker),
@@ -128,9 +161,10 @@ export function promptForAll(message: MessageNew, options: PromptOptions & Waite
   ]
     .filter((part): part is string => part !== undefined && part !== "")
     .join("\n\n");
-  // The words are whole here, under their names: the SDK's 1.0.4 says them as they are, after the
-  // note and the lines since, which no longer hold the messages that waited.
-  const { attachments: _files, replying_to: _reply, ...bare } = message;
-  const one = { ...bare, text, context: contextOf(message, earlier, answered) } as MessageNew;
+  // The words are whole here, under their names, with the lines before them: the SDK's 1.0.4 says
+  // them as they are, after the note. What Chips held goes ahead of its word on the agents' talk.
+  const { attachments: _files, replying_to: _reply, context: _lines, exchange, ...bare } = message;
+  const chips = [held, exchange?.note].filter((part): part is string => part !== undefined && part !== "").join("\n\n");
+  const one = { ...bare, text, ...(chips === "" ? {} : { exchange: { ...exchange, note: chips } }) } as MessageNew;
   return promptFor(one, { ...rest, sayWho: false });
 }

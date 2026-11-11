@@ -7,6 +7,7 @@
  * - `elsewhere` asks, and is answered in Hermes's own tools.
  * - `fail` fails.
  * - `slow` writes until it is stopped.
+ * - `tell <name>`, its last words, hands over to that agent after a moment: `@<name> over to you.`
  * - `ponder` writes a while, half a second, then answers, unless it is stopped first.
  * - A run told to carry on after a pause (Chips ADR 0293) plays as the one it carries on: the
  *   last words said in its session that weren't a carry-on.
@@ -314,6 +315,12 @@ export async function startFakeHermes(
       // Files named as the Chips SDK tells an agent: one from its folder, one from outside it.
       const output = "The page is ready.\n\nMEDIA:page.html\nMEDIA:../secret.txt";
       return finish(run, "completed", { completed: true, output, usage, runtime: { model: "heron-2" } });
+    }
+    const told = /\btell (\S+)$/.exec(words);
+    if (told !== null) {
+      await sleep(150);
+      if (run.status !== "running") return;
+      return finish(run, "completed", { completed: true, output: `@${told[1]} over to you.`, usage, runtime: { model: "heron-2" } });
     }
     if (/\bslow\b/.test(words)) {
       for (let i = 0; i < 200 && run.status === "running"; i += 1) {

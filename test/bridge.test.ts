@@ -1284,6 +1284,65 @@ describe("what waited for an agent (Chips ADR 0294)", () => {
   });
 });
 
+describe("what a turn is told of its agent's place in the room", () => {
+  const count = (chips: FakeChips, type: string) => chips.workspace.log.filter((event) => event.type === type).length;
+  /** The bridge with a second agent of its own, Nova, to add to the room; and the turn on a message, by its last words. */
+  const withNova = async () => {
+    const chips = await startFakeChips({ capabilities: ["agents", "new_agents"] });
+    open.push(() => chips.close());
+    const made = await rig({ chips });
+    const add = async () => {
+      const { askId } = await chips.askForAgent(chips.address.spaceId, "Nova");
+      await sent(chips, "membership.added", (event) => event.payload["made_for"] === askId);
+    };
+    const turnOn = (words: string) => made.hermes.started.find((run) => run.input.endsWith(`: ${words}`))?.input;
+    return { ...made, add, turnOn };
+  };
+
+  it("says what was said before the agent joined, at its first turn there and not again (Chips ADR 0088)", async () => {
+    const { chips, add, turnOn } = await withNova();
+    await chips.say("we need a board");
+    await sent(chips, "run.completed");
+    await add();
+    await chips.say("@Nova draw it");
+    await until(() => turnOn("@Nova draw it") !== undefined);
+    const first = turnOn("@Nova draw it") ?? "";
+    assert.match(first, /(?:^|\n\n)Said in this space before you joined:\n(?:[^\n]+\n)*[^\n]+: we need a board\n[^\n]+: Here is the answer\.\n/);
+    assert.equal(first.split("draw it").length, 2, "its own message is not among them");
+    await until(() => count(chips, "run.completed") === 2);
+
+    await chips.say("@Nova and name it");
+    await until(() => turnOn("@Nova and name it") !== undefined);
+    assert.doesNotMatch(turnOn("@Nova and name it") ?? "", /before you joined/);
+  });
+
+  it("says first, at its next turn, that Chips held its last words from the agents they named (Chips ADR 0097)", async () => {
+    const { chips, client, agentId, hermes, logs, add, turnOn } = await withNova();
+    await add();
+    const own = (await client.agents.list()).find((agent) => agent.agentId === agentId)?.name ?? "";
+    await chips.say(`@${own} tell Nova`);
+    await until(() => hermes.started.length === 1);
+    // A person pauses the agents while it works: what it then says to Nova is held.
+    chips.workspace.setExchange(chips.address.spaceId, "paused", chips.workspace.owner.participantId);
+    await until(() => logs.some((line) => /^Chips held what .+ said in /.test(line)));
+    await sent(chips, "run.completed");
+    assert.equal(hermes.started.length, 1, "Nova never had the words");
+
+    // A person's next words let the held message go to Nova too, so the agent's own turn is found by its words.
+    await chips.say(`@${own} what now`);
+    await until(() => turnOn(`@${own} what now`) !== undefined);
+    assert.match(
+      turnOn(`@${own} what now`) ?? "",
+      /^Your last message in this space was held, so the agents it named do not have it yet: messages between the agents here are held[^.]* until a person acts\. Until then, tell the person what is done and what is blocked, rather than asking the agents again\.\n\n/,
+    );
+    await until(() => count(chips, "run.completed") >= 3);
+
+    await chips.say(`@${own} and after`);
+    await until(() => turnOn(`@${own} and after`) !== undefined);
+    assert.doesNotMatch(turnOn(`@${own} and after`) ?? "", /was held, so the agents it named/, "said once");
+  });
+});
+
 describe("an interrupt", () => {
   it("stops Hermes's run and goes on with the person's words", async () => {
     const { chips, hermes } = await rig();
