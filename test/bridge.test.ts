@@ -1316,7 +1316,7 @@ describe("what a turn is told of its agent's place in the room", () => {
     assert.doesNotMatch(turnOn("@Nova and name it") ?? "", /before you joined/);
   });
 
-  it("says first, at its next turn, that Chips held its last words from the agents they named (Chips ADR 0097)", async () => {
+  it("says first, at its next turn, that Chips held its last words until a person acted, and the agents have them now (Chips ADR 0097)", async () => {
     const { chips, client, agentId, hermes, logs, add, turnOn } = await withNova();
     await add();
     const own = (await client.agents.list()).find((agent) => agent.agentId === agentId)?.name ?? "";
@@ -1328,12 +1328,12 @@ describe("what a turn is told of its agent's place in the room", () => {
     await sent(chips, "run.completed");
     assert.equal(hermes.started.length, 1, "Nova never had the words");
 
-    // A person's next words let the held message go to Nova too, so the agent's own turn is found by its words.
+    // A person's next words hand the held message to Nova, so the agent is told Nova has it; its own turn is found by its words.
     await chips.say(`@${own} what now`);
     await until(() => turnOn(`@${own} what now`) !== undefined);
     assert.match(
       turnOn(`@${own} what now`) ?? "",
-      /^Your last message in this space was held, so the agents it named do not have it yet: messages between the agents here are held[^.]* until a person acts\. Until then, tell the person what is done and what is blocked, rather than asking the agents again\.\n\n/,
+      /^Your last message in this space was held from the agents it named until a person acted\. A person has now, so Chips has handed it to them: do not send it again\.\n\n/,
     );
     await until(() => count(chips, "run.completed") >= 3);
 

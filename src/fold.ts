@@ -46,9 +46,16 @@ export interface Waited {
   readonly heldPost?: Pick<Ack, "held" | "exchange"> | undefined;
 }
 
-/** What an agent is told when Chips held its last message in the room (Chips ADR 0097), from what `post` answered. */
-export function heldWords(answer: Pick<Ack, "held" | "exchange"> | undefined): string | undefined {
+/**
+ * What an agent is told when Chips held its last message in the room (Chips ADR 0097), from what
+ * `post` answered. With `released`, a person has acted in the room since, which hands each agent
+ * the newest held message that was for it: the words say the agents have it now.
+ */
+export function heldWords(answer: Pick<Ack, "held" | "exchange"> | undefined, released = false): string | undefined {
   if (answer?.held !== true) return undefined;
+  if (released) {
+    return "Your last message in this space was held from the agents it named until a person acted. A person has now, so Chips has handed it to them: do not send it again.";
+  }
   const count = answer.exchange?.count;
   const since = typeof count === "number" && count > 0 ? ` (they have sent each other ${count} since a person last acted)` : "";
   return `Your last message in this space was held, so the agents it named do not have it yet: messages between the agents here are held${since} until a person acts. Until then, tell the person what is done and what is blocked, rather than asking the agents again.`;
@@ -145,7 +152,8 @@ function contextOf(message: MessageNew, earlier: readonly MessageNew[], answered
 /** The turn's text for this message and those that waited ahead of it: `promptFor`, from the SDK's 1.0.5. */
 export function promptForAll(message: MessageNew, options: PromptOptions & Waited = {}): string {
   const { earlier = [], since = [], answered = [], before, heldPost, ...rest } = options;
-  const held = heldWords(heldPost);
+  // Held still where this message says so; else a person has acted since, and it was handed over.
+  const held = heldWords(heldPost, message.exchange?.stage !== "held");
   const joinedBefore = beforeOf(message, earlier, before);
   if (earlier.length === 0 && since.length === 0 && answered.length === 0 && held === undefined && joinedBefore === undefined) {
     return promptFor(message, rest);
