@@ -96,6 +96,8 @@ export function keepIfAsked(
       1,
     );
   }
+  // From the SDK's 1.0.5 on, a service manager that refused says why itself, and that it runs here.
+  if (kept.state !== "off" && kept.state !== "unsupported") return;
   log(
     kept.state === "off"
       ? "Keeping it running is off here (CHIPS_KEEP=off): it runs here, while this terminal is open."
