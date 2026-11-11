@@ -63,6 +63,7 @@ import {
   firstTurnOf,
   heldNote,
   overheardLine,
+  promptFor,
   pushedInWords,
   Refuse,
   rulesFor,
@@ -92,7 +93,7 @@ import {
 } from "@chipschat/protocol";
 import { Contexts, type Profile, type Reader, type Roster } from "./context.js";
 import { Fills, type KeptFills, WHY_NOT, whyReadOnly } from "./fills.js";
-import { folds, GATHER_MS, type Heard, keepAnswered, keepHeard, promptForAll } from "./fold.js";
+import { folds, GATHER_MS, type Heard, keepAnswered, keepHeard } from "./fold.js";
 import { HermesClient, HermesError, type ProfileAddress, type RunEvent, TERMINAL } from "./hermes.js";
 import { envValue, profileHome, profileName } from "./home.js";
 import { hookUrl, SECRET_ENV } from "./hooks.js";
@@ -1464,7 +1465,7 @@ export class Bridge {
     turn.rules = rulesFor(message, { taker: speakerId, project });
     // What was said before the agent joined, at its first turn here; and that Chips held its last words.
     const joined = `${turn.who}|${room.spaceId}`;
-    let text: string | undefined = promptForAll(message, {
+    let text: string | undefined = promptFor(message, {
       taker: speakerId,
       sayWho,
       project,
