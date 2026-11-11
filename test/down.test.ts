@@ -14,7 +14,7 @@ import { checkGit, connect, fileStore } from "@chipschat/harness";
 import { Bridge, type BridgeState } from "../src/bridge.ts";
 import { startFakeHermes } from "./fake-hermes.ts";
 
-it("answers what was said while it was down", async () => {
+it("answers what was said while it was down, as one turn", async () => {
   const chips = await startFakeChips({ capabilities: ["agents"] });
   const hermes = await startFakeHermes();
   const folder = mkdtempSync(join(tmpdir(), "chips-hermes-down-"));
@@ -55,10 +55,16 @@ it("answers what was said while it was down", async () => {
   }
   await new Promise((resolve) => setTimeout(resolve, 100));
   const said = await chips.say("said while you were down");
-  const answered = answersTo(said.seq).catch(() => undefined);
+  await chips.say("and this");
+  const newest = await chips.say("and this too");
+  const answered = answersTo(newest.seq).catch(() => undefined);
   const second = await start();
   try {
     assert.ok((await answered) !== undefined, `no answer to what was said while it was down\n${logs.join("\n")}`);
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    const turns = chips.workspace.log.filter((event) => event.type === "run.started" && event.seq > said.seq);
+    assert.equal(turns.length, 1, `the three that waited are one turn (Chips ADR 0294)\n${logs.join("\n")}`);
+    assert.ok(logs.some((line) => /takes 3 messages that waited/.test(line)));
   } finally {
     second.bridge.stop();
     second.client.close();

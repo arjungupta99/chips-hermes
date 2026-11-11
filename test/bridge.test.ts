@@ -68,6 +68,7 @@ async function rig(
     hermesRoot?: string;
     profiles?: ProfileMaker;
     restartGateway?: () => Promise<void>;
+    gatherMs?: number;
   } = {},
 ): Promise<Rig> {
   const chips = options.chips ?? (await startFakeChips({ capabilities: ["agents"] }));
@@ -95,6 +96,7 @@ async function rig(
     state,
     saveState: () => undefined,
     healthEveryMs: 50,
+    gatherMs: options.gatherMs ?? 10,
     log: (line) => void logs.push(line),
     ...(options.hermesRoot === undefined ? {} : { hermesRoot: options.hermesRoot, env: {} }),
     ...(options.profiles === undefined ? {} : { profiles: options.profiles }),
@@ -1188,6 +1190,97 @@ describe("words said in the room while it works (Chips ADRs 0105, 0106)", () => 
     await sent(chips, "run.completed");
     await new Promise((resolve) => setTimeout(resolve, 50));
     assert.equal(chips.workspace.log.find((event) => event.type === "message.heard"), undefined);
+  });
+});
+
+describe("what waited for an agent (Chips ADR 0294)", () => {
+  const count = (chips: FakeChips, type: string) => chips.workspace.log.filter((event) => event.type === type).length;
+  const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  it("is one turn for all it is sent at once: each message in full, oldest first, and none said twice", async () => {
+    const { chips, hermes, logs } = await rig({ gatherMs: 150 });
+    await Promise.all([chips.say("draw the board\nnine by nine"), chips.say("and name it"), chips.say("no border")]);
+    await sent(chips, "run.completed");
+    await pause(150);
+    assert.equal(hermes.started.length, 1, "one turn for the three");
+    assert.equal(count(chips, "run.started"), 1);
+    const prompt = hermes.started[0]?.input ?? "";
+    assert.match(prompt, /^In this space:/, "under the newest's note");
+    assert.match(
+      prompt,
+      /\n\n3 messages for you waited while you were working or away\. They follow, oldest first\. Answer them together in one reply, and where a later one changes or settles an earlier one, go by the later\.\n\n[^\n]+: draw the board\nnine by nine\n\n[^\n]+: and name it\n\n[^\n]+: no border$/,
+    );
+    assert.equal(prompt.split("draw the board").length, 2, "said once: left out of the lines since");
+    assert.equal(prompt.split("and name it").length, 2);
+    assert.ok(logs.some((line) => /takes 3 messages that waited/.test(line)));
+    assert.equal(chips.workspace.log.find((event) => event.type === "run.started")?.payload["goal"], "no border", "named for the newest");
+  });
+
+  it("takes a message for it into the Hermes run going, and says it heard it", async () => {
+    const { chips, hermes } = await rig();
+    await chips.say("listen");
+    const started = await sent(chips, "run.started");
+    await until(() => hermes.started.length > 0);
+    await pause(60);
+    const more = await chips.say("and name it\nBoard");
+    const heard = await sent(chips, "message.heard");
+    assert.equal(heard.run_id, started.run_id);
+    assert.equal(heard.payload["message_id"], messageIdOf(more.id));
+    assert.match(hermes.steers[0] ?? "", /^[^\n]+: and name it\nBoard$/, "said as a turn's own words are");
+    await sent(chips, "run.completed");
+    await pause(150);
+    assert.equal(hermes.started.length, 1, "no turn of its own");
+    assert.equal(count(chips, "run.started"), 1);
+  });
+
+  it("puts back to wait what Hermes kept back, and its next turn is on all of it", async () => {
+    const { chips, hermes } = await rig();
+    await chips.say("listen late");
+    await sent(chips, "run.started");
+    await until(() => hermes.started.length > 0);
+    await pause(60);
+    await chips.say("and name it");
+    await chips.say("no border");
+    await until(() => hermes.started.length === 2);
+    await until(() => count(chips, "run.completed") === 2);
+    await pause(150);
+    assert.equal(hermes.started.length, 2);
+    assert.equal(chips.workspace.log.find((event) => event.type === "message.heard"), undefined, "Hermes never gave them");
+    const prompt = hermes.started[1]?.input ?? "";
+    assert.match(prompt, /2 messages for you waited[^]*\n\n[^\n]+: and name it\n\n[^\n]+: no border$/);
+    assert.doesNotMatch(prompt, /listen late/, "what it had a turn on is not among the lines since again");
+  });
+
+  it("leaves a reply to a message, and what comes after it, for the next turn, which says what it answers", async () => {
+    const { chips, hermes } = await rig();
+    const hello = await chips.say("hello");
+    await sent(chips, "run.completed");
+    await chips.say("ponder");
+    await until(() => hermes.started.length === 2);
+    await pause(60);
+    await chips.say("about that", undefined, { replyTo: messageIdOf(hello.id) });
+    await chips.say("and name it");
+    await until(() => hermes.started.length === 3);
+    await pause(100);
+    assert.deepEqual(hermes.steers, [], "neither joined the run going");
+    const prompt = hermes.started[2]?.input ?? "";
+    assert.match(prompt, /2 messages for you waited[^]*is replying to their own message[^]*> hello\n\n[^\n]+: about that\n\n[^\n]+: and name it$/);
+  });
+
+  it("tells the turn what was said to others after the message arrived", async () => {
+    const { chips, hermes } = await rig();
+    const hello = await chips.say("hello");
+    await sent(chips, "run.completed");
+    await chips.say("ponder");
+    await until(() => hermes.started.length === 2);
+    await pause(60);
+    const waits = await chips.say("about that", undefined, { replyTo: messageIdOf(hello.id) });
+    await pause(30);
+    await chips.asOwner({ type: "message.post", space_id: waits.space_id, text: "@Arjun The quotes\nare in." });
+    await until(() => hermes.started.length === 3);
+    const prompt = hermes.started[2]?.input ?? "";
+    assert.match(prompt, /: about that\n\nSaid in this space after that message, to others:\nArjun \(owner\): @Arjun The quotes are in\.$/);
+    assert.doesNotMatch(prompt, /messages for you waited/);
   });
 });
 

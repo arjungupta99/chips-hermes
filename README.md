@@ -21,6 +21,7 @@ Apache-2.0, published on npm as `@chipschat/hermes`.
 | In Chips | From Hermes (`/v1/runs`) |
 | --- | --- |
 | A message to the agent | `POST /v1/runs` in the room's session: the room note, what was said, the words |
+| What waited for an agent (Chips ADR 0294) | a message for an agent whose run is going is steered into it (`POST …/steer`), and the run says `message.heard` once it completes with the words; one Hermes kept back (`pending_steer`), a reply to a message, and anything the run won't take wait. What waits is one run once the agent is free, not one each: under the newest message's note, each message that waited said in full, oldest first, then what was said in the room after, to others. A message Chips handed over, and a Not right?, are a run of their own. An idle agent starts 150 ms after the first words, so all it is sent at once, as when the bridge comes back, is one run |
 | The thinking bubble's words | `reasoning.available`, `message.interim` |
 | Steps, drawn by kind | `tool.started` / `tool.completed` (by `tool_call_id`, else first in, first out per tool); a sub-agent's `subagent.start` / `subagent.complete` |
 | The reply | `run.completed`'s `output`, else the `message.delta`s |
