@@ -17,6 +17,9 @@
  * - What it asks before acting is an approval card.
  * - At the end come its words in the room and its tokens. A sub-agent's cost is the step's.
  * - Stop is `POST …/stop`, and a steer is `POST …/steer`.
+ * - Pause is the same `POST …/stop`, but the turn waits rather than ends: Hermes keeps what the
+ *   stopped run did in the session, and on Resume the same session is told to carry on (Chips
+ *   ADR 0293). Each run says it can pause as it starts.
  *
  * A reply a person says wasn't right ("Not right?", Chips ADR 0200) is a turn of the agent that
  * said it, in the same session: shown its reply and the note, it answers again in its place.
@@ -270,6 +273,30 @@ export function instructionsFor(folder: string | undefined, project = false, rul
   return [here, MARKDOWN_HERE, rules].filter((part) => part !== "").join("\n\n");
 }
 
+/** What a paused turn's session is told on Resume (Chips ADR 0293), before anything steered meanwhile. */
+export const CARRY_ON = "You were paused partway through this. Carry on from where you stopped. Nothing you wrote before the pause reached the room, so write your whole reply.";
+
+/**
+ * What the run that carries on after a pause is told besides, in its instructions, which Hermes
+ * keeps out of the session. Hermes keeps the words a stopped run had written in the session, so
+ * the agent may take up mid-sentence; but none of them reached the room, and only this run's
+ * answer is posted there, so it gives the whole of it.
+ */
+export const CARRIED_ON =
+  "You were paused partway through this turn. Nothing you wrote before the pause reached the room, and only " +
+  "your answer in this run is posted there: give your whole answer, not just the part after where you stopped.";
+
+/** Hermes's events that mean its run is at work: on a paused run, one the pause hasn't stopped. */
+const WORKING: ReadonlySet<string> = new Set([
+  "message.delta",
+  "message.interim",
+  "reasoning.available",
+  "tool.started",
+  "tool.completed",
+  "subagent.start",
+  "subagent.complete",
+]);
+
 /** A folder under `root` named after an agent, `-2` and on when another agent has that one. */
 export function freeFolder(root: string, name: string, taken: readonly string[]): string {
   const slug =
@@ -352,6 +379,10 @@ interface Room {
 interface Pending {
   readonly approvalId: string;
   answered: boolean;
+  /** The Hermes run that asked: an ask of a run that has ended waits on nothing. */
+  readonly hermesRun: string;
+  /** The steps going when it asked, one of them the call that waits: once all have ended, Hermes has stopped waiting. */
+  readonly during: readonly string[];
 }
 
 /** The turn going in a room: the Chips run, the Hermes run, and what has come back. */
@@ -376,6 +407,12 @@ interface Turn {
   readonly allowed: string[];
   /** A person's interrupt stopped the Hermes run: the turn goes on with their words. */
   interrupted: boolean;
+  /** Whether a Hermes run of the turn is going: started, and not yet at its end. */
+  live: boolean;
+  /** The Hermes run going was stopped for a pause (Chips ADR 0293): its end holds the turn, and doesn't end it. */
+  pausing: boolean;
+  /** The next Hermes run carries on after a pause: its instructions say only its answer is posted. */
+  carried: boolean;
   /** Words said in the room while it works, steered into the Hermes run going: heard once it gives them (Chips ADR 0106). */
   readonly overheard: { readonly messageId: string; readonly line: string }[];
   /** The folder the agent works in and its files are sent from, said in each run's instructions. */
@@ -1162,6 +1199,7 @@ export class Bridge {
     const { agent, spaceId } = room;
     const speaker = speakerId === undefined ? this.options.chips : this.options.chips.as(speakerId);
     const run = await speaker.runs.start({ spaceId, goal: goal ?? goalOf(message, agent.config.name) });
+    this.sayPausable(run, speakerId);
     const turn: Turn = {
       run,
       speaker,
@@ -1177,6 +1215,9 @@ export class Bridge {
       approvals: new Map(),
       allowed: [],
       interrupted: false,
+      live: false,
+      pausing: false,
+      carried: false,
       overheard: [],
     };
     this.working.set(run.id, turn);
@@ -1185,6 +1226,24 @@ export class Bridge {
     } finally {
       this.working.delete(run.id);
     }
+  }
+
+  /**
+   * That the run can pause (Chips ADR 0293), said once as it starts, on a status of "Thinking…",
+   * which no client draws as a thought. The SDK this bridge bundles (1.0.4) can't say `pausable`
+   * in `run.status()`, so it goes on the connection's own `send`, in the envelope the SDK gives
+   * the run: its space, itself, and the agent it is. A server from before drops the field, and
+   * its runs offer Stop alone; a status that doesn't go fails nothing.
+   */
+  private sayPausable(run: Run, speakerId: string | undefined): void {
+    const envelope = {
+      space_id: run.spaceId,
+      run_id: run.id,
+      ...(speakerId === undefined ? {} : { actor: { kind: "agent", id: speakerId } }),
+    };
+    void Promise.resolve()
+      .then(() => this.options.chips.send("run.status", envelope, { phase: "thinking", verb_phrase: "Thinking…", pausable: true }))
+      .catch((error: unknown) => this.log(`couldn't say run ${run.id} can pause: ${messageOf(error)}`));
   }
 
   /** A turn begun: Hermes's runs of it, from the first words to its end. */
@@ -1200,6 +1259,8 @@ export class Bridge {
       turn.cancelled = true;
       if (turn.hermesRun !== "") void agent.client.stop(turn.hermesRun).catch(() => undefined);
     });
+    // A Pause with no Hermes run going holds the next prompt instead (`resumed`).
+    run.on("pause", () => this.pauseHermes(turn));
     run.on("steer", (steer) => {
       const words = `${steer.from?.display_name ?? "The person"} adds: ${steer.text}`;
       void this.steered(turn, words, steer.mode);
@@ -1217,8 +1278,16 @@ export class Bridge {
     turn.rules = rulesFor(message, { taker: speakerId, project });
     let text: string | undefined = promptFor(message, { taker: speakerId, sayWho, project, rulesHeld: true });
     for (let round = 0; text !== undefined && !turn.cancelled && !run.over; round += 1) {
+      if (!(await this.resumed(turn))) return;
       const last = await this.once(turn, session, text, `${run.id}:${round}`);
       if (last === undefined) return;
+      const paused = turn.pausing;
+      turn.pausing = false;
+      // Stopped for a pause: Hermes's end of that run is not the turn's.
+      if (last.event === "run.cancelled" && paused && !turn.cancelled) {
+        text = await this.carryOn(turn, last);
+        continue;
+      }
       if (last.event === "run.cancelled" && turn.interrupted && turn.next.length > 0) {
         turn.interrupted = false;
         text = turn.next.shift();
@@ -1233,28 +1302,94 @@ export class Bridge {
     }
   }
 
+  /** Whether the turn goes on: at once, or once a pause is resumed; not once the run is stopped. */
+  private async resumed(turn: Turn): Promise<boolean> {
+    await turn.run.whenRunning();
+    return !turn.cancelled && !turn.run.over;
+  }
+
+  /**
+   * A paused run's Hermes run stopped where it is (Chips ADR 0293), as Stop stops it, but marked as
+   * pausing, so that its end holds the turn and doesn't end it. Not while it waits on a person's
+   * answer, which a pause doesn't interrupt; nor with no Hermes run going, where the next prompt
+   * is held instead. A stop that doesn't reach Hermes is tried again at its next event.
+   */
+  private pauseHermes(turn: Turn): void {
+    if (!turn.run.paused || turn.run.over || turn.cancelled || !turn.live || turn.pausing || this.asking(turn)) return;
+    turn.pausing = true;
+    const hermesRun = turn.hermesRun;
+    void turn.agent.client.stop(hermesRun).catch((error: unknown) => {
+      if (turn.hermesRun === hermesRun) turn.pausing = false;
+      this.log(`Hermes didn't stop ${turn.agent.config.name}'s run ${hermesRun} for a pause: ${messageOf(error)}`);
+    });
+  }
+
+  /**
+   * Whether the Hermes run going waits on a person's answer to an ask: not once it is answered,
+   * here or in Hermes's own tools, nor once every step going when it asked has ended, the call
+   * that waited among them (Hermes gives up waiting after its own timeout, and goes on).
+   */
+  private asking(turn: Turn): boolean {
+    const open = new Set([...turn.open.values()].flat());
+    return [...turn.approvals.values()].some(
+      (pending) =>
+        !pending.answered &&
+        pending.hermesRun === turn.hermesRun &&
+        (pending.during.length === 0 || pending.during.some((stepId) => open.has(stepId))),
+    );
+  }
+
+  /**
+   * A Hermes run stopped for a pause (Chips ADR 0293). What it did stays in its session, as
+   * Hermes keeps it: the calls it made, and the words it had written, marked as cut short. None
+   * of it is posted, and the run doesn't end. The half-written words are dropped from the reply:
+   * the run that carries on is told to give its whole answer (`CARRIED_ON`), which is the reply,
+   * so the room reads one answer. Once resumed, the same session is told to carry on, with what
+   * Hermes kept back of what was steered into the stopped run and what was steered while paused.
+   * Nothing, once the run is stopped while paused: the server has ended it.
+   */
+  private async carryOn(turn: Turn, last: RunEvent): Promise<string | undefined> {
+    await this.closeSteps(turn, "failed", "Paused before it finished.");
+    await this.counted(turn, last);
+    turn.reply = "";
+    if (!(await this.resumed(turn))) return undefined;
+    // An interrupt's words, said while it was paused, are among them.
+    turn.interrupted = false;
+    turn.carried = true;
+    const kept = typeof last["pending_steer"] === "string" ? last["pending_steer"].trim() : "";
+    return [CARRY_ON, kept, ...turn.next.splice(0)].filter((part) => part !== "").join("\n\n");
+  }
+
   /** One Hermes run of the turn: started, its events heard to the end. The end, or nothing on failure. */
   private async once(turn: Turn, session: string, text: string, key: string): Promise<RunEvent | undefined> {
     const { agent } = turn;
+    const carried = turn.carried;
+    turn.carried = false;
     try {
+      const instructions = instructionsFor(turn.folder, turn.project !== undefined, turn.rules);
       turn.hermesRun = await agent.client.startRun({
         text,
         sessionId: session,
         ...this.runModel(turn),
         key,
-        instructions: instructionsFor(turn.folder, turn.project !== undefined, turn.rules),
+        instructions: carried ? `${instructions}\n\n${CARRIED_ON}` : instructions,
       });
     } catch (error) {
       await this.failed(turn, `${agent.config.name} couldn't start in Hermes: ${messageOf(error)}`, true);
       return undefined;
     }
+    turn.live = true;
+    // A Stop or a Pause heard while Hermes was starting the run stops it now.
     if (turn.cancelled) await agent.client.stop(turn.hermesRun).catch(() => undefined);
+    else this.pauseHermes(turn);
     let last: RunEvent | undefined;
     try {
       last = (await agent.client.events(turn.hermesRun, (event) => this.heard(turn, event))) ?? (await this.endOf(turn));
     } catch (error) {
       this.log(`lost ${agent.config.name}'s run ${turn.hermesRun}: ${messageOf(error)}`);
       last = await this.endOf(turn);
+    } finally {
+      turn.live = false;
     }
     await this.toldWhileWorking(turn, last);
     return last;
@@ -1287,8 +1422,14 @@ export class Bridge {
    */
   private async toldWhileWorking(turn: Turn, last: RunEvent | undefined): Promise<void> {
     const told = turn.overheard.splice(0);
+    const kept = typeof last?.["pending_steer"] === "string" ? last["pending_steer"] : "";
+    if (last?.event === "run.cancelled" && turn.pausing && !turn.cancelled) {
+      // Stopped for a pause: what Hermes kept back goes into the words that carry on (`carryOn`),
+      // and is heard once that run completes.
+      turn.overheard.push(...told.filter(({ line }) => kept.includes(line)));
+      return;
+    }
     if (last?.event !== "run.completed") return;
-    const kept = typeof last["pending_steer"] === "string" ? last["pending_steer"] : "";
     for (const { messageId, line } of told) {
       if (kept.includes(line)) continue;
       await turn.run.heard(messageId).catch((error: unknown) => this.log(`couldn't say a turn heard ${messageId}: ${messageOf(error)}`));
@@ -1352,28 +1493,31 @@ export class Bridge {
     switch (event.event) {
       case "message.delta":
         turn.reply += typeof event["delta"] === "string" ? event["delta"] : "";
-        return;
+        break;
       case "message.interim":
       case "reasoning.available":
         this.sayThought(turn, String(event["text"] ?? ""), event.event === "message.interim" ? "writing" : "thinking");
-        return;
+        break;
       case "tool.started":
       case "subagent.start":
         await this.started(turn, event);
-        return;
+        break;
       case "tool.completed":
       case "subagent.complete":
         await this.completed(turn, event);
-        return;
+        break;
       case "approval.request":
         void this.ask(turn, event);
-        return;
+        break;
       case "approval.responded":
         await this.settled(turn, event);
-        return;
+        break;
       default:
-        return;
+        break;
     }
+    // At work while paused: the pause came while it waited on a person, who it waits on no more
+    // (answered in Hermes, or given up on), or its stop was lost. It stops now.
+    if (WORKING.has(event.event)) this.pauseHermes(turn);
   }
 
   private sayThought(turn: Turn, text: string, phase: string): void {
@@ -1446,7 +1590,12 @@ export class Bridge {
     const description = typeof event["description"] === "string" ? event["description"] : undefined;
     const choices = Array.isArray(event["choices"]) ? (event["choices"] as unknown[]).map(String) : ["once", "deny"];
     const approvalId = ids.next("approval");
-    turn.approvals.set(requestId ?? approvalId, { approvalId, answered: false });
+    turn.approvals.set(requestId ?? approvalId, {
+      approvalId,
+      answered: false,
+      hermesRun: turn.hermesRun,
+      during: [...turn.open.values()].flat(),
+    });
     const asked = turn.run.approval({
       approvalId,
       action: {
@@ -1464,6 +1613,10 @@ export class Bridge {
     const decision = await Promise.race([asked, stopped]);
     const pending = turn.approvals.get(requestId ?? approvalId);
     if (decision === undefined || pending === undefined || pending.answered) return;
+    // An answer given while the run is paused reaches Hermes once it is resumed (Chips ADR 0293):
+    // Hermes waits on it meanwhile, which holds the agent. Stopped meanwhile, Stop has stopped
+    // Hermes's run, and the answer goes nowhere.
+    if (!(await this.resumed(turn)) || pending.answered) return;
     pending.answered = true;
     if (decision.allowed) turn.allowed.push(approvalId);
     const generation = event["execution_generation"];
@@ -1589,9 +1742,11 @@ export class Bridge {
       .catch(() => undefined);
   }
 
-  private async closeSteps(turn: Turn, status: "done" | "failed"): Promise<void> {
+  private async closeSteps(turn: Turn, status: "done" | "failed", error?: string): Promise<void> {
     for (const [, ids] of turn.open) {
-      for (const stepId of ids) await turn.run.step({ stepId, status }).catch(() => undefined);
+      for (const stepId of ids) {
+        await turn.run.step({ stepId, status, ...(error === undefined ? {} : { error }) }).catch(() => undefined);
+      }
     }
     turn.open.clear();
   }

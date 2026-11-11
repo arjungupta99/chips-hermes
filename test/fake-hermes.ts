@@ -7,6 +7,9 @@
  * - `elsewhere` asks, and is answered in Hermes's own tools.
  * - `fail` fails.
  * - `slow` writes until it is stopped.
+ * - `ponder` writes a while, half a second, then answers, unless it is stopped first.
+ * - A run told to carry on after a pause (Chips ADR 0293) plays as the one it carries on: the
+ *   last words said in its session that weren't a carry-on.
  * - `listen` works until it is steered, or a while, then answers; with `late`, it keeps the steer
  *   back as Hermes does one it couldn't give before the run ended (`pending_steer`).
  * - `drop` loses its stream midway and is read from its state.
@@ -32,6 +35,7 @@ import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
+import { CARRY_ON } from "../src/bridge.ts";
 import { envValue, profileHome } from "../src/home.ts";
 
 type Event = Record<string, unknown> & { event: string };
@@ -47,6 +51,8 @@ interface FakeRun {
   drop?: boolean;
   /** The session it is in, where its words and answer are kept. */
   session?: string;
+  /** The words it plays by: its own, or a carry-on's, the run's it carries on. */
+  plays?: string;
   /** The session it was asked for, and the profile it ran on. */
   named?: string;
   profile?: string;
@@ -90,6 +96,8 @@ export interface FakeHermes {
   healthAsked: number;
   /** While set, `GET /health` waits for it, then answers as Hermes was when asked. */
   held: Promise<void> | undefined;
+  /** While set, `POST /api/sessions` waits for it: a turn's first prompt is not sent until then. */
+  sessionsHeld?: Promise<void> | undefined;
   /** The session compressed: it goes on under a new id with what it held. The new id. */
   compress(sessionId: string): string;
   /** Where Hermes's outbound webhook POSTs each profile's readings, and what it signs them with. */
@@ -277,7 +285,7 @@ export async function startFakeHermes(
       return finish(run, "completed", { completed: true, output, usage, runtime: { model: "heron-2" } });
     }
     // The person's words, the input's last line: not the room note before them, which may say "ask".
-    const words = run.input.split("\n").at(-1) ?? "";
+    const words = (run.plays ?? run.input).split("\n").at(-1) ?? "";
     if ((options.askFirst === true && run.session === fake.sessions[0]) || /\bask\b/.test(words)) {
       emit(run, "tool.started", { tool: "terminal", preview: "npm test", tool_call_id: "call_1" });
       const choice = await asked(run, {
@@ -313,6 +321,14 @@ export async function startFakeHermes(
         await sleep(20);
       }
       return;
+    }
+    if (/\bponder\b/.test(words)) {
+      for (let i = 0; i < 25 && run.status === "running"; i += 1) {
+        emit(run, "message.delta", { delta: "." });
+        await sleep(20);
+      }
+      if (run.status !== "running") return;
+      return finish(run, "completed", { completed: true, output: "Here is the whole answer.", usage, runtime: { model: "heron-2" } });
     }
     if (/\blisten\b/.test(words)) {
       const before = fake.steers.length;
@@ -393,6 +409,7 @@ export async function startFakeHermes(
       if (method === "POST" && path === "/api/sessions") {
         // Hermes keeps a session's title to that session, as its API server does.
         const title = String((await bodyOf(request))["title"] ?? "");
+        await fake.sessionsHeld;
         const taken = titles.get(title);
         if (taken !== undefined) {
           return json(response, 400, { error: { message: `Title '${title}' is already in use by session ${taken}` } });
@@ -441,6 +458,10 @@ export async function startFakeHermes(
         if (named !== undefined) run.session = latestOf(named);
         if (named !== undefined) run.named = named;
         run.profile = profile;
+        if (run.input.startsWith(CARRY_ON)) {
+          const carried = fake.started.findLast((each) => each.sessionId === named && !each.input.startsWith(CARRY_ON));
+          run.plays = carried?.input ?? run.input;
+        }
         const history = run.session === undefined ? [] : (histories.get(run.session) ?? []);
         if (run.session !== undefined) histories.set(run.session, [...history, run.input]);
         fake.started.push({

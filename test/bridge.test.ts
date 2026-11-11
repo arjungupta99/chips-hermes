@@ -9,11 +9,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, it } from "node:test";
 import { type FakeChips, type StoredEvent, startFakeChips } from "@chipschat/conformance";
-import { type Chips, connect, type Decision, type Refuse } from "@chipschat/harness";
+import { type Chips, connect, type Decision, type Refuse, type Run } from "@chipschat/harness";
 import { type AgentFork, type Feedback, messageIdOf, type ModelChangeFrame, newId } from "@chipschat/protocol";
 import {
   Bridge,
   type BridgeState,
+  CARRIED_ON,
+  CARRY_ON,
   choiceOf,
   forkName,
   freeFolder,
@@ -825,7 +827,8 @@ describe("a turn", () => {
     await chips.say("summarise the notes");
     const started = await sent(chips, "run.started");
     assert.equal(started.actor.id, agentId, "the Main agent took it");
-    const status = await sent(chips, "run.status");
+    // After the status that says it can pause (Chips ADR 0293).
+    const status = await sent(chips, "run.status", (event) => event.payload["verb_phrase"] !== "Thinking…");
     assert.equal(status.payload["verb_phrase"], "Let me look at the notes.");
     const step = await sent(chips, "step.log", (event) => event.payload["status"] === "done");
     assert.equal(step.payload["tool"], "read_file");
@@ -1200,6 +1203,220 @@ describe("an interrupt", () => {
     assert.match(hermes.started[1]?.input ?? "", /adds: Just summarise\.$/);
     const words = await sent(chips, "message.post", (event) => event.run_id === started.run_id);
     assert.equal(words.payload["text"], "Here is the answer.");
+  });
+});
+
+// No bridge heard a pause: Chips hid the thinking bubble, and the agent worked on out of sight (Chips ADR 0293).
+describe("a pause (Chips ADR 0293)", () => {
+  /** What the bridge sends on its connection itself, and the runs it starts, to look at and hand events to. */
+  interface Watched {
+    readonly runs: Run[];
+    readonly sends: { readonly envelope: Readonly<Record<string, unknown>>; readonly payload: Readonly<Record<string, unknown>>; readonly type: string }[];
+  }
+
+  function watching(watched: Watched) {
+    type Start = Parameters<Chips["runs"]["start"]>[0];
+    const kept = async (starting: Promise<Run>): Promise<Run> => {
+      const run = await starting;
+      watched.runs.push(run);
+      return run;
+    };
+    return (client: Chips): Chips =>
+      new Proxy(client, {
+        get(target, name) {
+          if (name === "send") {
+            return (type: string, envelope: Readonly<Record<string, unknown>>, payload: Readonly<Record<string, unknown>>, key?: string) => {
+              watched.sends.push({ type, envelope, payload });
+              return target.send(type, envelope, payload, key);
+            };
+          }
+          if (name === "runs") return { ...target.runs, start: (input: Start) => kept(target.runs.start(input)) };
+          if (name === "as") {
+            return (agentId: string) => {
+              const speaker = target.as(agentId);
+              return { ...speaker, runs: { start: (input: Start) => kept(speaker.runs.start(input)) } };
+            };
+          }
+          const value: unknown = Reflect.get(target, name);
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+  }
+
+  /** The statuses the bridge sent saying a run can pause. */
+  const pausable = (watched: Watched) =>
+    watched.sends.filter((each) => each.type === "run.status" && each.payload["pausable"] === true);
+
+  const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  /** What the room was told of a run besides its work: its words, and an end. */
+  const told = (chips: FakeChips, runId: string | null) =>
+    chips.workspace.log.filter(
+      (event) => event.run_id === runId && ["message.post", "run.completed", "run.failed"].includes(event.type),
+    );
+
+  it("says once, as each run starts, that it can pause, in the run's own envelope", async () => {
+    const watched: Watched = { runs: [], sends: [] };
+    const { chips, agentId } = await rig({ chipsFor: watching(watched) });
+    await chips.say("summarise the notes");
+    const first = await sent(chips, "run.started");
+    await sent(chips, "run.completed", (event) => event.run_id === first.run_id);
+    // A turn of the harness's own, no agent named: a "Not right?" on a message the room doesn't have.
+    const { participantId, displayName } = chips.workspace.owner;
+    const given = await chips.asOwner({
+      type: "feedback",
+      space_id: chips.address.spaceId,
+      message_id: newId("message"),
+      kind: "correction",
+      text: "That was wrong.",
+      from: { participant_id: participantId, kind: "person", display_name: displayName, role: "owner" },
+    });
+    const second = await sent(chips, "run.started", (event) => event.seq > given.seq);
+    await sent(chips, "run.completed", (event) => event.run_id === second.run_id);
+    const status = { phase: "thinking", verb_phrase: "Thinking…", pausable: true };
+    assert.deepEqual(
+      pausable(watched).map(({ envelope, payload }) => [envelope, payload]),
+      [
+        [{ space_id: first.space_id, run_id: first.run_id, actor: { kind: "agent", id: agentId } }, status],
+        [{ space_id: second.space_id, run_id: second.run_id }, status],
+      ],
+    );
+    // Chips took it as the run's first status, before Hermes's own thought.
+    const statuses = chips.workspace.log.filter((event) => event.type === "run.status" && event.run_id === first.run_id);
+    assert.deepEqual(
+      statuses.map((event) => event.payload["verb_phrase"]),
+      ["Thinking…", "Let me look at the notes."],
+    );
+  });
+
+  it("stops Hermes's run where it is, holds, and carries on in the same session when resumed, to one answer", async () => {
+    const watched: Watched = { runs: [], sends: [] };
+    const { chips, hermes } = await rig({ chipsFor: watching(watched) });
+    await chips.say("ponder the plan");
+    const started = await sent(chips, "run.started");
+    const run = { space_id: started.space_id, run_id: started.run_id };
+    await until(() => hermes.started.length > 0);
+    await wait(60);
+    await chips.asOwner({ type: "run.pause", ...run });
+    await until(() => hermes.stops.length > 0);
+    assert.deepEqual(hermes.stops, ["run_1"]);
+    // Hermes's end of the run it stopped ends nothing, and nothing of it is posted.
+    await wait(200);
+    assert.equal(hermes.started.length, 1, "held");
+    assert.deepEqual(told(chips, started.run_id), []);
+    await chips.asOwner({ type: "run.resume", ...run });
+    const words = await sent(chips, "message.post", (event) => event.run_id === started.run_id);
+    await sent(chips, "run.completed", (event) => event.run_id === started.run_id);
+    const [first, next] = hermes.started;
+    assert.equal(next?.input, CARRY_ON);
+    assert.equal(next?.sessionId, first?.sessionId, "the same session");
+    assert.deepEqual(next?.history, [first?.input], "which has what it was asked");
+    assert.ok(next?.instructions?.endsWith(`\n\n${CARRIED_ON}`), "told only its answer is posted");
+    assert.ok(!first?.instructions?.includes(CARRIED_ON));
+    // The answer of the run that carried on, not the dots written before the pause.
+    assert.equal(words.payload["text"], "Here is the whole answer.");
+    assert.equal(told(chips, started.run_id).filter((event) => event.type === "message.post").length, 1);
+    assert.equal(
+      pausable(watched).filter(({ envelope }) => envelope["run_id"] === started.run_id).length,
+      1,
+      "said once, over two runs in Hermes",
+    );
+  });
+
+  it("ends quietly when stopped while paused, and the room's next words are answered", async () => {
+    const { chips, hermes } = await rig();
+    await chips.say("ponder the plan");
+    const started = await sent(chips, "run.started");
+    const run = { space_id: started.space_id, run_id: started.run_id };
+    await until(() => hermes.started.length > 0);
+    await chips.asOwner({ type: "run.pause", ...run });
+    await until(() => hermes.stops.length > 0);
+    await wait(60);
+    await chips.asOwner({ type: "run.cancel", ...run });
+    await wait(150);
+    assert.equal(hermes.started.length, 1, "nothing carried on");
+    assert.deepEqual(told(chips, started.run_id), [], "no words, and no end but the person's");
+    const next = await chips.say("one more");
+    const again = await sent(chips, "run.started", (event) => event.seq > next.seq);
+    await sent(chips, "run.completed", (event) => event.run_id === again.run_id);
+    assert.match(hermes.started[1]?.input ?? "", /one more$/);
+  });
+
+  it("holds the first prompt when paused before it, and sends it as it was when resumed", async () => {
+    const watched: Watched = { runs: [], sends: [] };
+    const { chips, hermes } = await rig({ chipsFor: watching(watched) });
+    let release: () => void = () => undefined;
+    hermes.sessionsHeld = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await chips.say("summarise the notes");
+    const started = await sent(chips, "run.started");
+    const run = { space_id: started.space_id, run_id: started.run_id };
+    await chips.asOwner({ type: "run.pause", ...run });
+    await until(() => watched.runs[0]?.paused === true);
+    hermes.sessionsHeld = undefined;
+    release();
+    await until(() => hermes.sessions.length === 1);
+    await wait(150);
+    assert.equal(hermes.started.length, 0, "held");
+    await chips.asOwner({ type: "run.resume", ...run });
+    await sent(chips, "run.completed", (event) => event.run_id === started.run_id);
+    assert.equal(hermes.started.length, 1);
+    assert.match(hermes.started[0]?.input ?? "", /summarise the notes$/);
+    assert.deepEqual(hermes.stops, [], "nothing to stop");
+  });
+
+  it("interrupts nothing while it waits on a person, and gives Hermes an answer given while paused once resumed", async () => {
+    const watched: Watched = { runs: [], sends: [] };
+    const { chips, hermes } = await rig({ chipsFor: watching(watched) });
+    await chips.say("ask first");
+    const asked = await sent(chips, "approval.request");
+    const run = watched.runs[0];
+    assert.ok(run !== undefined);
+    // This fake is the server from before the ADR, which refuses a pause while a run waits on an
+    // ask; the server keeps such a run paused now, so the pause and the resume are handed to the
+    // run as the SDK hands them over.
+    const into = { space_id: asked.space_id, run_id: asked.run_id };
+    run.hear({ type: "run.pause", ...into });
+    await wait(100);
+    assert.deepEqual(hermes.stops, [], "nothing interrupted");
+    await chips.decide(String(asked.payload["approval_id"]), "approved");
+    await wait(150);
+    assert.deepEqual(hermes.answers, [], "the answer held while paused");
+    run.hear({ type: "run.resume", ...into });
+    const words = await sent(chips, "message.post", (event) => event.run_id === asked.run_id);
+    assert.equal(words.payload["text"], "Given: once");
+    assert.deepEqual(hermes.answers, [{ choice: "once", request_id: "req_1" }]);
+    assert.deepEqual(hermes.stops, []);
+    assert.equal(hermes.started.length, 1, "one run in Hermes, never stopped");
+  });
+
+  it("pauses and resumes again and again, carrying on each time", async () => {
+    const { chips, hermes } = await rig();
+    await chips.say("ponder the plan");
+    const started = await sent(chips, "run.started");
+    const run = { space_id: started.space_id, run_id: started.run_id };
+    for (const count of [1, 2]) {
+      await until(() => hermes.started.length === count);
+      await wait(60);
+      await chips.asOwner({ type: "run.pause", ...run });
+      await until(() => hermes.stops.length === count);
+      await chips.asOwner({ type: "run.resume", ...run });
+    }
+    // Twice more, quicker than Hermes ends the run it stops: stopped once, and carried on once.
+    await until(() => hermes.started.length === 3);
+    await wait(60);
+    for (const type of ["run.pause", "run.resume", "run.pause", "run.resume"]) void chips.asOwner({ type, ...run });
+    const words = await sent(chips, "message.post", (event) => event.run_id === started.run_id);
+    await sent(chips, "run.completed", (event) => event.run_id === started.run_id);
+    assert.deepEqual(hermes.stops, ["run_1", "run_2", "run_3"]);
+    assert.deepEqual(
+      hermes.started.slice(1).map((each) => each.input),
+      [CARRY_ON, CARRY_ON, CARRY_ON],
+    );
+    assert.equal(new Set(hermes.started.map((each) => each.sessionId)).size, 1, "one session throughout");
+    assert.equal(words.payload["text"], "Here is the whole answer.");
+    assert.equal(told(chips, started.run_id).filter((event) => event.type === "message.post").length, 1);
   });
 });
 

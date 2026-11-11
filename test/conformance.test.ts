@@ -66,8 +66,11 @@ it("passes the golden scenario", async () => {
       },
     });
     assert.ok(report.passed, formatReport(report).join("\n"));
+    // Each run says it can pause (Chips ADR 0293), which this kit, from before, warns a server drops:
+    // as one from before does, offering Stop alone. Any other warning stands.
+    const pausable = (message: string) => message.startsWith("run.status carried `pausable`");
     assert.deepEqual(
-      report.findings.filter((finding) => finding.severity !== "note"),
+      report.findings.filter((finding) => finding.severity !== "note" && !pausable(finding.message)),
       [],
       formatReport(report).join("\n"),
     );
