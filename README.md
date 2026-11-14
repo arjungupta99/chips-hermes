@@ -190,8 +190,11 @@ space from the +) gets a Hermes profile, made by Hermes with
 The profile is named after the agent when it is made, in lowercase letters, digits and `-`
 (`nova`, `nova-2` when Hermes has a `nova` already), and keeps that name after a rename, as the
 agent's folder does. Deleting the agent in Chips leaves its profile in Hermes: what it learned is
-yours to delete, with `hermes profile delete <name>`. `~/Chips/.bridges/hermes/sessions.json` remembers
-which profile is whose.
+yours to delete, with `hermes profile delete <name>`. Its folder stays too, and the bridge's log says
+where both are. The bridge itself forgets the agent: which session each of its rooms was, its model
+and its last context reading. A profile a copy of the agent still answers through is kept its place
+until the copy is deleted too. An agent made in Chips is never given a folder that is on disk already.
+`~/Chips/.bridges/hermes/sessions.json` remembers which profile is whose.
 
 The one gateway serves every profile under `/p/<name>`, and takes a new one at once when the bridge
 asks over its control socket (`rescan-profiles`, as `hermes profile create` does). But a gateway

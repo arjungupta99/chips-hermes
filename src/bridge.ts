@@ -42,7 +42,7 @@
  * neither is claimed.
  */
 
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import type {
   Ack,
@@ -305,8 +305,12 @@ const WORKING: ReadonlySet<string> = new Set([
   "subagent.complete",
 ]);
 
-/** A folder under `root` named after an agent, `-2` and on when another agent has that one. */
-export function freeFolder(root: string, name: string, taken: readonly string[]): string {
+/**
+ * A folder under `root` named after an agent, `-2` and on when another agent has that one. For an
+ * agent made in Chips (`made`), never one on disk already either, which a deleted agent may have
+ * left: an agent the config names takes the folder of its name, where a person may have put its files.
+ */
+export function freeFolder(root: string, name: string, taken: readonly string[], made = false): string {
   const slug =
     name
       .toLowerCase()
@@ -314,7 +318,7 @@ export function freeFolder(root: string, name: string, taken: readonly string[])
       .replace(/^-+|-+$/g, "") || "agent";
   for (let count = 1; ; count += 1) {
     const folder = join(root, count === 1 ? slug : `${slug}-${count}`);
-    if (!taken.includes(folder)) return folder;
+    if (!taken.includes(folder) && !(made && existsSync(folder))) return folder;
   }
 }
 
@@ -579,11 +583,16 @@ export class Bridge {
       const client = this.options.clientFor?.(config) ?? new HermesClient(config.address);
       this.agents.push({ config, key, client, agentId: registered.agentId, up: true });
     }
+    this.ours = new Set([...known.map((agent) => agent.agentId), ...this.agents.map((agent) => agent.agentId)]);
+    // One Chips no longer has was deleted while the bridge was away.
+    for (const who of this.kept()) {
+      const has = (agent: { readonly agentId: string; readonly key: string }) => agent.agentId === who || agent.key === who;
+      if (!this.agents.some(has) && !known.some(has)) this.forget(who);
+    }
     for (const [agentId, profile] of Object.entries(this.options.state.made ?? {})) {
       const running = this.runningOn(agentId, profile, known.find((agent) => agent.agentId === agentId)?.name ?? profile);
       if (running !== undefined) this.own.set(agentId, running);
     }
-    this.ours = new Set([...known.map((agent) => agent.agentId), ...this.agents.map((agent) => agent.agentId)]);
     // Taken in the order they came: a message, then what was overheard after it (Chips ADR 0294).
     const inOrder = (what: string, then: () => Promise<void>) => {
       this.arriving = this.arriving.then(then).catch((error: unknown) => this.log(`${what} went wrong: ${messageOf(error)}`));
@@ -614,6 +623,15 @@ export class Bridge {
       void this.agentsMoved();
     });
     chips.on("agent.released", () => void this.agentsMoved());
+    // A person's delete of an agent. One that was in no room is said in no other way: an archive
+    // of its room took it out before, and the delete moves nobody.
+    chips.on("event", (event) => {
+      const heard = event as unknown as Readonly<Record<string, unknown>>;
+      if (heard["type"] !== "agent.deleted" || heard["harness_id"] !== chips.harnessId) return;
+      const name = heard["name"];
+      this.forget(String(heard["agent_id"]), typeof name === "string" ? name : undefined);
+      void this.agentsMoved();
+    });
     await this.sayHowItIs();
     this.health = setInterval(() => void this.sayHowItIs(), this.options.healthEveryMs ?? 30_000);
     this.health.unref();
@@ -691,6 +709,74 @@ export class Bridge {
     }
     await this.contexts?.refresh();
     await this.sendModels();
+  }
+
+  /** Everyone the bridge keeps anything for: a configured agent by its key, any other by its Chips id. */
+  private kept(): Set<string> {
+    const { state } = this.options;
+    return new Set([
+      ...Object.keys(state.sessions).map((id) => id.slice(0, id.lastIndexOf("|"))),
+      ...Object.keys(state.folders ?? {}),
+      ...Object.keys(state.profiles ?? {}),
+      ...Object.keys(state.made ?? {}),
+      ...Object.keys(state.models ?? {}),
+      ...Object.keys(state.fills?.readings ?? {}),
+      ...Object.keys(state.fills?.lasts ?? {}),
+    ]);
+  }
+
+  /**
+   * An agent deleted in Chips: what the bridge kept for it goes, and nothing more is read or sent
+   * for it. Its folder and its Hermes profile stay, and the log says where: what it wrote and what
+   * it learned are a person's to delete. A profile made for it keeps its place here while a copy
+   * of the agent still answers through it, and loses it when the last of them is deleted. Said in
+   * the log once, by its name where the delete was heard (`called`): a delete heard again after a
+   * start that already forgot the agent finds nothing of it, and says nothing.
+   */
+  private forget(agentId: string, called?: string): void {
+    const { state, hermesRoot: root } = this.options;
+    const name = called ?? this.names.get(agentId) ?? agentId;
+    const ours = this.ours.has(agentId);
+    const folder = state.folders?.[agentId];
+    const profile = state.made?.[agentId];
+    const through = state.profiles?.[agentId];
+    let dropped = false;
+    const drop = (kept: Record<string, unknown> | undefined, id: string) => {
+      if (kept?.[id] === undefined) return;
+      delete kept[id];
+      dropped = true;
+    };
+    for (const [id, room] of this.rooms) {
+      if (!id.startsWith(`${agentId}|`)) continue;
+      room.queue.length = 0;
+      clearTimeout(room.gathering);
+      this.rooms.delete(id);
+    }
+    for (const id of Object.keys(state.sessions)) if (id.startsWith(`${agentId}|`)) drop(state.sessions, id);
+    for (const id of [...this.saidBefore.keys()]) if (id.startsWith(`${agentId}|`)) this.saidBefore.delete(id);
+    drop(state.folders, agentId);
+    drop(state.profiles, agentId);
+    drop(state.models, agentId);
+    this.names.delete(agentId);
+    this.ours.delete(agentId);
+    this.listed = this.listed.filter((agent) => agent.agentId !== agentId);
+    for (const each of [agentId, through]) {
+      if (each === undefined || this.ours.has(each) || Object.values(state.profiles ?? {}).includes(each)) continue;
+      drop(state.made, each);
+      this.own.delete(each);
+    }
+    this.options.chips.settings.forget(agentId);
+    if (state.fills?.readings?.[agentId] !== undefined || state.fills?.lasts?.[agentId] !== undefined) dropped = true;
+    this.fills?.forget(agentId);
+    if (!dropped && !ours) return;
+    this.options.saveState(state);
+    const left = [
+      ...(folder !== undefined && existsSync(folder) ? [`its folder stays, ${folder}`] : []),
+      ...(profile !== undefined && root !== undefined && existsSync(profileHome(root, profile))
+        ? [`its Hermes profile stays, ${profile}`]
+        : []),
+    ];
+    this.log([`${name} deleted`, ...left].join("; "));
   }
 
   /** The harness's agents that read anything now: the active ones listed. */
@@ -1089,7 +1175,8 @@ export class Bridge {
     const { folders: root, state } = this.options;
     if (root === undefined) return undefined;
     const kept = state.folders?.[agentId];
-    const folder = kept ?? freeFolder(root, name, Object.values(state.folders ?? {}));
+    const made = !this.agents.some((each) => each.agentId === agentId);
+    const folder = kept ?? freeFolder(root, name, Object.values(state.folders ?? {}), made);
     mkdirSync(folder, { recursive: true });
     if (kept === undefined) {
       state.folders = { ...state.folders, [agentId]: folder };

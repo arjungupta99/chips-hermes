@@ -69,6 +69,8 @@ async function rig(
     profiles?: ProfileMaker;
     restartGateway?: () => Promise<void>;
     gatherMs?: number;
+    /** How often each agent's files are read again. */
+    contextEveryMs?: number;
   } = {},
 ): Promise<Rig> {
   const chips = options.chips ?? (await startFakeChips({ capabilities: ["agents"] }));
@@ -101,6 +103,7 @@ async function rig(
     ...(options.hermesRoot === undefined ? {} : { hermesRoot: options.hermesRoot, env: {} }),
     ...(options.profiles === undefined ? {} : { profiles: options.profiles }),
     ...(options.restartGateway === undefined ? {} : { restartGateway: options.restartGateway }),
+    ...(options.contextEveryMs === undefined ? {} : { contextEveryMs: options.contextEveryMs }),
   });
   open.push(async () => {
     bridge.stop();
@@ -410,6 +413,99 @@ describe("a Hermes profile of its own for each agent made in Chips (Chips ADR 02
     assert.equal(profiles.made.length, 1, "no profile of its own: Hermes can't take a session to another");
     assert.ok((await client.agents.list()).some((each) => each.agentId === copy));
   });
+
+  it("forgets an agent a person deletes, and leaves its folder and its Hermes profile", async () => {
+    const folders = mkdtempSync(join(tmpdir(), "chips-hermes-folders-"));
+    open.push(async () => rmSync(folders, { recursive: true, force: true }));
+    const r = await withProfiles({ folders });
+    const { chips, state, root, logs } = r;
+    const { room, agentId } = await asked(r, "Nova");
+    await said(chips, "plan the trip", room);
+    const folder = state.folders?.[agentId] ?? "";
+    assert.equal(folder, join(folders, "nova"));
+    assert.ok(chips.workspace.deleteAgent(agentId));
+    await until(() => state.made?.[agentId] === undefined);
+    assert.equal(state.sessions[`${agentId}|${room}`], undefined, "its session forgotten");
+    assert.equal(state.folders?.[agentId], undefined);
+    assert.ok(existsSync(folder), "what it wrote is kept");
+    assert.ok(existsSync(join(root, "profiles", "nova")), "and what it learned");
+    assert.ok(logs.includes(`Nova deleted; its folder stays, ${folder}; its Hermes profile stays, nova`), logs.join("\n"));
+  });
+
+  // Chips HS-26: its room archived, which took it out, then the agent deleted. The bridge heard
+  // nothing, and its log said every 15 seconds that Chips had no agent of that id.
+  it("hears the delete of an agent that was in no room, and reads its files no more", async () => {
+    const r = await withProfiles({ contextEveryMs: 20 });
+    const { chips, client, state, logs } = r;
+    const { room, agentId } = await asked(r, "Nova");
+    await said(chips, "plan the trip", room);
+    const archived = chips.workspace.submit(chips.workspace.owner, {
+      idempotency_key: "archive-plans",
+      type: "space.updated",
+      space_id: room,
+      state: "closed",
+    });
+    assert.ok(archived.ok);
+    await sent(chips, "membership.removed", (event) => event.payload["participant_id"] === agentId);
+    const free = (await client.agents.list()).find((each) => each.agentId === agentId);
+    assert.deepEqual([free?.state, free?.room], ["active", null], "in no room, and still an agent");
+    assert.ok(chips.workspace.deleteAgent(agentId));
+    await until(() => state.made?.[agentId] === undefined);
+    assert.ok(logs.includes("Nova deleted; its Hermes profile stays, nova"), logs.join("\n"));
+    const from = logs.length;
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    assert.deepEqual(
+      logs.slice(from).filter((line) => line.includes("not sent")),
+      [],
+      "nothing more sent for it",
+    );
+  });
+
+  it("forgets, when it starts, an agent deleted while it was away", async () => {
+    const first = await withProfiles();
+    const { room, agentId } = await asked(first, "Nova");
+    await said(first.chips, "plan the trip", room);
+    first.bridge.stop();
+    first.client.close();
+    assert.ok(first.chips.workspace.deleteAgent(agentId));
+    const again = await withProfiles({ chips: first.chips, hermes: first.hermes, state: first.state, hermesRoot: first.root });
+    assert.equal(again.state.made?.[agentId], undefined);
+    assert.equal(again.state.sessions[`${agentId}|${room}`], undefined);
+    assert.ok(again.logs.includes(`${agentId} deleted; its Hermes profile stays, nova`), again.logs.join("\n"));
+    assert.deepEqual(
+      again.logs.filter((line) => line.includes("not sent")),
+      [],
+    );
+    // Said once: the next start has nothing of it left to forget.
+    again.bridge.stop();
+    again.client.close();
+    const third = await withProfiles({ chips: first.chips, hermes: first.hermes, state: first.state, hermesRoot: first.root });
+    assert.deepEqual(
+      third.logs.filter((line) => line.includes("deleted")),
+      [],
+    );
+  });
+
+  it("keeps a deleted agent's profile its place while a copy answers through it, and no longer", async () => {
+    const r = await withProfiles();
+    const { chips, hermes, state } = r;
+    const { room, agentId } = await asked(r, "Nova");
+    await said(chips, "plan the trip", room);
+    const second = await chips.openRoom("Second opinion");
+    const { forkId } = await chips.askForFork(agentId, second);
+    const joined = await sent(chips, "membership.added", (event) => event.payload["fork_of"] === forkId);
+    const copy = String(joined.payload["participant_id"]);
+    await until(() => state.profiles?.[copy] === agentId);
+    assert.ok(chips.workspace.deleteAgent(agentId));
+    await until(() => state.sessions[`${agentId}|${room}`] === undefined);
+    assert.equal(state.made?.[agentId], "nova", "the copy's session is in that profile's Hermes");
+    await said(chips, "what did we plan?", second);
+    assert.deepEqual([hermes.started.at(-1)?.profile, hermes.started.at(-1)?.sessionId], ["nova", `chips-fork-${forkId}`]);
+    assert.ok(chips.workspace.deleteAgent(copy));
+    await until(() => state.made?.[agentId] === undefined);
+    assert.equal(state.profiles?.[copy], undefined);
+    assert.equal(state.sessions[`${copy}|${second}`], undefined);
+  });
 });
 
 // Chips offered Fork for the other harnesses' agents, and Hermes's made no copies (Chips ADR 0087).
@@ -713,6 +809,15 @@ describe("the files an answer names", () => {
     );
     assert.match(hermes.started[0]?.instructions ?? "", new RegExp(`Your own folder is ${own}: make and keep your files there`));
     assert.equal(state.folders?.[agentId], own, "kept, so a rename keeps it");
+  });
+
+  it("gives an agent made in Chips no folder that is on disk already, which a deleted agent may have left", () => {
+    const root = mkdtempSync(join(tmpdir(), "chips-hermes-left-"));
+    open.push(async () => rmSync(root, { recursive: true, force: true }));
+    mkdirSync(join(root, "nova"));
+    assert.equal(freeFolder(root, "Nova", [], true), join(root, "nova-2"));
+    assert.equal(freeFolder(root, "Vega", [], true), join(root, "vega"));
+    assert.equal(freeFolder(root, "Nova", []), join(root, "nova"), "an agent the config names takes the folder of its name");
   });
 
   it("names a folder after the agent, and the next one with the same name -2", () => {
