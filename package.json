@@ -1,6 +1,6 @@
 {
   "name": "@chipschat/hermes",
-  "version": "1.0.30",
+  "version": "1.0.31",
   "description": "Hermes Agent as a Chips harness, on its Runs API: each profile a Chips agent, each room a Hermes session.",
   "license": "Apache-2.0",
   "repository": {
@@ -33,9 +33,9 @@
     "release": "npm run build && npm test && npm pack"
   },
   "devDependencies": {
-    "@chipschat/conformance": "1.0.7",
-    "@chipschat/harness": "1.0.7",
-    "@chipschat/protocol": "1.0.7",
+    "@chipschat/conformance": "1.0.8",
+    "@chipschat/harness": "1.0.8",
+    "@chipschat/protocol": "1.0.8",
     "@types/node": "22.19.0",
     "esbuild": "0.27.7",
     "tsx": "4.21.0",
