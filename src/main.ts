@@ -32,7 +32,7 @@ import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { dirname, join } from "node:path";
-import { checkGit, connect, fileStore, helloOnce, JoinError, join as joinChips, reportStep } from "@chipschat/harness";
+import { checkGit, connect, fileStore, helloOnce, JoinError, join as joinChips, reportStep, runsKept } from "@chipschat/harness";
 import { Bridge, type BridgeState, settingsFor, WANTS } from "./bridge.js";
 import { Gateways, gatewayLog, gatewaysOf, restarter, thisMachine } from "./gateway.js";
 import { HermesClient } from "./hermes.js";
@@ -136,6 +136,13 @@ const joined = await joinChips({
 keepIfAsked(LABEL, joined.url, ["HERMES_HOME", ...config.agents.map((agent) => agent.keyEnv ?? "API_SERVER_KEY")], log);
 
 // A person's edits from an agent's page reach the bridge once it is made.
+// Each try that fails is told here, every few seconds: said once, and again when the reason
+// changes, so a server down for a night is a line in the log and not thousands.
+let waitingFor: string | undefined;
+const waitingSaid = (why: string) => {
+  if (why !== waitingFor) log(`waiting for Chips: ${why}`);
+  waitingFor = why;
+};
 let bridge: Bridge | undefined;
 // A person's Restart (Chips ADR 0094): nothing said of Hermes until its gateway is back, or isn't.
 const restart = restarter({
@@ -152,6 +159,10 @@ const chips = await connect({
   token: joined.token,
   client: { name: "chips-hermes", version: VERSION },
   store: fileStore(join(folder, "chips-state.json")),
+  // The copy this machine keeps running starts at login, perhaps before its server is up: it waits
+  // and tries again, where a run by hand hears at once that Chips can't be reached.
+  waitForServer: runsKept(LABEL),
+  onWaiting: waitingSaid,
   onRestart: restart,
   settings: settingsFor(() => bridge),
 });
