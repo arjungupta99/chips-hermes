@@ -6,9 +6,9 @@
  */
 
 import { strict as assert } from "node:assert";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { after, before, describe, it } from "node:test";
 import { STILL_GOOD } from "../../src/setup.ts";
 import { type FakeHermes, startFakeHermes } from "../fake-hermes.ts";
@@ -16,11 +16,24 @@ import { type CardLink, here, type ScratchChips, scratchChips, skip } from "./ki
 
 const HELLO = /^Hi, I'm Hermes, here through Hermes\. Ask me anything\.$/;
 
+/**
+ * This PATH without a folder that has a `hermes` in it: a machine Hermes isn't installed on, as
+ * GitHub's runner is. The tests passed only where a real Hermes was installed, until they ran
+ * there before a release.
+ */
+const withoutHermes = (process.env["PATH"] ?? "")
+  .split(delimiter)
+  .filter((dir) => dir !== "" && !existsSync(join(dir, "hermes")))
+  .join(delimiter);
+
 describe("Hermes's card, from a link to its hello", { skip, timeout: 180_000 }, () => {
   let chips: ScratchChips;
   let hermes: FakeHermes;
   let home: string;
   let card: CardLink;
+  /** A folder with a stand-in `hermes`: the card's join runs none, and only asks one is there. */
+  let standIn: string;
+  const withHermes = () => [standIn, withoutHermes].join(delimiter);
   /** The card's command as a person runs it: a card that still asks for the key gets it filled in. */
   const filled = (command: string) => command.replace("API_SERVER_KEY=…", `API_SERVER_KEY=${hermes.key}`);
   const kept = () =>
@@ -33,8 +46,8 @@ describe("Hermes's card, from a link to its hello", { skip, timeout: 180_000 }, 
    * found nothing to stop for, and joined) fails here within a minute and is stopped, so no bridge
    * is left running to hold the test open.
    */
-  const stopped = async (command: string, says: RegExp) => {
-    const run = chips.run(command, { folder: here, home });
+  const stopped = async (command: string, says: RegExp, path = withHermes()) => {
+    const run = chips.run(command, { folder: here, home, path });
     try {
       const still = new Promise<"still running">((done) => setTimeout(done, 60_000, "still running").unref());
       assert.equal(await Promise.race([run.exited, still]), 1, run.output());
@@ -49,15 +62,20 @@ describe("Hermes's card, from a link to its hello", { skip, timeout: 180_000 }, 
   before(async () => {
     [chips, hermes] = await Promise.all([scratchChips(), startFakeHermes()]);
     home = mkdtempSync(join(tmpdir(), "chips-hermes-home-"));
+    standIn = mkdtempSync(join(tmpdir(), "chips-hermes-bin-"));
+    writeFileSync(join(standIn, "hermes"), "#!/bin/sh\necho \"the test's stand-in hermes: $*\" >&2\nexit 1\n", { mode: 0o755 });
     card = await chips.card("hermes");
   });
 
   after(async () => {
     await Promise.all([chips?.stop(), hermes?.close()]);
     rmSync(home, { recursive: true, force: true });
+    rmSync(standIn, { recursive: true, force: true });
   });
 
   it("stops on each thing not set up, and leaves the link good", async () => {
+    // Nothing of Hermes here: no config, no Hermes's own .env, no hermes on the PATH.
+    await stopped(card.command, /Hermes isn't installed on this machine: run `curl -fsSL .*`, then `hermes setup`/, withoutHermes);
     // No config is Hermes's default profile; its key is the API server's, from Hermes's own .env.
     await stopped(card.command, /Hermes's key isn't in \$API_SERVER_KEY or .*\.hermes\/\.env\. Turn on Hermes's API server/);
     // Pointed at the fake Hermes, which the default profile's port isn't. The config is where the
@@ -78,7 +96,7 @@ describe("Hermes's card, from a link to its hello", { skip, timeout: 180_000 }, 
   });
 
   it("joins with what the card grants, and says hello once in its room", async () => {
-    const run = chips.run(filled(card.command), { folder: here, home });
+    const run = chips.run(filled(card.command), { folder: here, home, path: withHermes() });
     try {
       const request = await chips.until("the link taken up", async () => {
         const read = await chips.request(card.requestId);
@@ -104,7 +122,7 @@ describe("Hermes's card, from a link to its hello", { skip, timeout: 180_000 }, 
 
   it("started again with the same command, says nothing more", async () => {
     const { space_id } = await chips.request(card.requestId);
-    const run = chips.run(filled(card.command), { folder: here, home });
+    const run = chips.run(filled(card.command), { folder: here, home, path: withHermes() });
     try {
       await run.saw(/answering for Hermes through Hermes/);
       // Its hello, were it to say one, comes straight after.
@@ -118,7 +136,7 @@ describe("Hermes's card, from a link to its hello", { skip, timeout: 180_000 }, 
   it("takes up a new link in place of the key it kept, and says hello in the new room", async () => {
     const first = await chips.request(card.requestId);
     const again = await chips.card("hermes");
-    const run = chips.run(filled(again.command), { folder: here, home });
+    const run = chips.run(filled(again.command), { folder: here, home, path: withHermes() });
     try {
       const request = await chips.until("the new link taken up", async () => {
         const read = await chips.request(again.requestId);
