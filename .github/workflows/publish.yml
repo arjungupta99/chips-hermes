@@ -4,14 +4,14 @@
 #
 # Before it does, the tests run, and so do the end-to-end tests: the gallery's card run as a person
 # runs it, against a scratch Chips from Chips's public repository. They were run by hand only, and
-# a fresh OpenClaw join went out wrong in every release for three weeks (Chips finding HS-25). A
-# change to this file runs them too, and publishes nothing a version npm has.
+# a fresh OpenClaw join went out wrong in every release for three weeks (Chips finding HS-25).
+# They run on every push to main, so a break shows at the commit that made it; npm publish runs
+# only for a version npm doesn't have.
 name: Publish
 
 on:
   push:
     branches: [main]
-    paths: [package.json, .github/workflows/publish.yml]
   workflow_dispatch:
 
 permissions:
