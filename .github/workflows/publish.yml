@@ -1,12 +1,17 @@
 # Publishes this bridge to npm when a release lands on main, that is when package.json holds a
 # version npm doesn't have yet; a version npm already has is left alone. npm trusts this workflow
 # (trusted publishing, set up per package on npmjs.com), so no npm token or sign-in is kept anywhere.
+#
+# Before it does, the tests run, and so do the end-to-end tests: the gallery's card run as a person
+# runs it, against a scratch Chips from Chips's public repository. They were run by hand only, and
+# a fresh OpenClaw join went out wrong in every release for three weeks (Chips finding HS-25). A
+# change to this file runs them too, and publishes nothing a version npm has.
 name: Publish
 
 on:
   push:
     branches: [main]
-    paths: [package.json]
+    paths: [package.json, .github/workflows/publish.yml]
   workflow_dispatch:
 
 permissions:
@@ -19,7 +24,7 @@ concurrency:
 jobs:
   publish:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
@@ -38,9 +43,22 @@ jobs:
           else
             echo "new=true" >> "$GITHUB_OUTPUT"
           fi
-      - if: steps.npm.outputs.new == 'true'
-        run: npm ci
-      - if: steps.npm.outputs.new == 'true'
-        run: npm test
+      - run: npm ci
+      - run: npm test
+      # Outside this checkout, so nothing of it is packed. Only what the connect kit runs: its
+      # server, its command and the packages they share.
+      - name: Chips, for the end-to-end tests
+        run: |
+          git clone --quiet --depth 1 https://github.com/arjungupta99/chips.git "$RUNNER_TEMP/chips"
+          npm install --global pnpm@10.34.5
+          cd "$RUNNER_TEMP/chips"
+          pnpm install --frozen-lockfile --filter chips --filter "@chipschat/server..." --filter "@chipschat/cli..." --filter "@chipschat/core..."
+      - name: End-to-end tests
+        shell: bash
+        env:
+          CHIPS_REPO: ${{ runner.temp }}/chips
+        run: |
+          npm run e2e 2>&1 | tee "$RUNNER_TEMP/e2e.log"
+          grep -q -E '^(ℹ|#) skipped 0$' "$RUNNER_TEMP/e2e.log" || { echo "The end-to-end tests were skipped: no Chips at $CHIPS_REPO"; exit 1; }
       - if: steps.npm.outputs.new == 'true'
         run: npm publish
