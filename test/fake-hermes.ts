@@ -2,7 +2,11 @@
  * A scripted Hermes API server for the tests, on Hermes's own routes and event names: a run plays
  * by the words it was given.
  * - `ask` asks before running a command, and says the choice it was given; `ask long`, with a
- *   description longer than an approval's question may be.
+ *   description longer than an approval's question may be; `ask huge`, with a command longer than
+ *   an approval's preview may be.
+ * - `consent` asks about something that is no command, and says the choice it was given.
+ * - `impatient` asks before running a command, gives up on the answer by its own clock, as Hermes
+ *   does, and works on another way for a while before it answers.
  * - `delegate` hands work to a sub-agent that says what it cost.
  * - `elsewhere` asks, and is answered in Hermes's own tools.
  * - `fail` fails.
@@ -130,6 +134,9 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** A description longer than the protocol lets an approval's question be. */
 export const LONG_DESCRIPTION = `Run the tests ${"and the benchmarks ".repeat(12).trim()}`;
+
+/** A command longer than the protocol lets an approval's preview be. */
+export const HUGE_COMMAND = `echo ${"x".repeat(300_000)}`;
 
 export async function startFakeHermes(
   options: { askFirst?: boolean; usage?: Record<string, number> } = {},
@@ -291,7 +298,7 @@ export async function startFakeHermes(
       emit(run, "tool.started", { tool: "terminal", preview: "npm test", tool_call_id: "call_1" });
       const choice = await asked(run, {
         request_id: "req_1",
-        command: "npm test",
+        command: /\bhuge\b/.test(words) ? HUGE_COMMAND : "npm test",
         description: /\blong\b/.test(words) ? LONG_DESCRIPTION : "Run the tests",
         choices: ["once", "session", "always", "deny"],
       });
@@ -303,6 +310,29 @@ export async function startFakeHermes(
       emit(run, "tool.completed", { tool: "terminal", duration: 0.4, error: denied, preview: JSON.stringify(result), tool_call_id: "call_1" });
       if (run.status === "cancelled") return;
       return finish(run, "completed", { completed: true, output: `Given: ${choice}`, usage, runtime: { model: "heron-2" } });
+    }
+    if (/\bconsent\b/.test(words)) {
+      const choice = await asked(run, {
+        request_id: "req_3",
+        description: "Use the calendar server",
+        choices: ["once", "session", "always", "deny"],
+      });
+      if (run.status === "cancelled") return;
+      return finish(run, "completed", { completed: true, output: `Given: ${choice}`, usage, runtime: { model: "heron-2" } });
+    }
+    if (/\bimpatient\b/.test(words)) {
+      emit(run, "tool.started", { tool: "terminal", preview: "npm test", tool_call_id: "call_1" });
+      emit(run, "approval.request", { request_id: "req_4", command: "npm test", description: "Run the tests", choices: ["once", "deny"] });
+      await sleep(60);
+      // Its own wait ran out: the call ends as not allowed, and it goes on.
+      const result = { output: "", exit_code: -1, error: "approval timed out", approval: "Timed out." };
+      emit(run, "tool.completed", { tool: "terminal", duration: 0.06, error: true, preview: JSON.stringify(result), tool_call_id: "call_1" });
+      for (let i = 0; i < 15 && run.status === "running"; i += 1) {
+        emit(run, "message.delta", { delta: "." });
+        await sleep(20);
+      }
+      if (run.status !== "running") return;
+      return finish(run, "completed", { completed: true, output: "Went another way.", usage, runtime: { model: "heron-2" } });
     }
     if (/\belsewhere\b/.test(words)) {
       emit(run, "approval.request", { request_id: "req_2", command: "rm -rf build", choices: ["once", "deny"] });

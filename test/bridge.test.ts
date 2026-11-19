@@ -24,12 +24,13 @@ import {
   lookingAgain,
   MARKDOWN_HERE,
   titleFrom,
+  UNANSWERED,
   WANTS,
 } from "../src/bridge.ts";
 import { HermesClient } from "../src/hermes.ts";
 import { envValue } from "../src/home.ts";
 import type { ProfileMaker } from "../src/profiles.ts";
-import { type FakeHermes, fakeProfiles, LONG_DESCRIPTION, startFakeHermes } from "./fake-hermes.ts";
+import { type FakeHermes, fakeProfiles, HUGE_COMMAND, LONG_DESCRIPTION, startFakeHermes } from "./fake-hermes.ts";
 
 interface Rig {
   readonly chips: FakeChips;
@@ -119,6 +120,38 @@ async function until(done: () => boolean, timeoutMs = 3000): Promise<void> {
     if (Date.now() > by) throw new Error(`not so within ${timeoutMs} ms`);
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
+}
+
+/** What a run posted in the space. */
+const postsIn = (chips: FakeChips, runId: string | null) =>
+  chips.workspace.log.filter((event) => event.type === "message.post" && event.run_id === runId).map((event) => event.payload["text"]);
+
+/** How many events of a type Chips has taken. */
+const countOf = (chips: FakeChips, type: string) => chips.workspace.log.filter((event) => event.type === type).length;
+
+/** A person's Always on an ask of a harness whose Chips's rules are off: Chips writes no rule and says the harness keeps it (Chips ADR 0300). */
+function keptAlways(chips: FakeChips, asked: StoredEvent): Promise<StoredEvent> {
+  return chips.asOwner({
+    space_id: asked.space_id,
+    run_id: asked.run_id,
+    type: "approval.resolved",
+    approval_id: String(asked.payload["approval_id"]),
+    decision: "approved",
+    scope: "always",
+    keeps: "harness",
+  });
+}
+
+/** An ask's hour runs out with nobody's answer: Chips resolves it `expired`. */
+function expire(chips: FakeChips, asked: StoredEvent): Promise<StoredEvent> {
+  return chips.asOwner({
+    space_id: asked.space_id,
+    run_id: asked.run_id,
+    type: "approval.resolved",
+    approval_id: String(asked.payload["approval_id"]),
+    decision: "expired",
+    scope: "once",
+  });
 }
 
 function sent(chips: FakeChips, type: string, more: (event: StoredEvent) => boolean = () => true): Promise<StoredEvent> {
@@ -1234,19 +1267,114 @@ describe("what it asks", () => {
     );
   });
 
-  it("picks the scope Hermes offers, else once", () => {
+  it("gives Hermes an Always as once for what is not a command too, while Chips keeps the rule", async () => {
+    const { chips, hermes } = await rig();
+    await chips.say("consent please");
+    const asked = await sent(chips, "approval.request");
+    assert.equal((asked.payload["action"] as { kind: string }).kind, "hermes.approval");
+    await chips.decide(String(asked.payload["approval_id"]), "approved", { scope: "always" });
+    const words = await sent(chips, "message.post", (event) => event.run_id === asked.run_id);
+    // Chips wrote the rule. An always Hermes kept too would outlive that rule being switched off.
+    assert.equal(words.payload["text"], "Given: once");
+    assert.deepEqual(hermes.answers, [{ choice: "once", request_id: "req_3" }]);
+  });
+
+  it("gives Hermes its own always, heard from Chips, when Chips says Hermes keeps it (Chips ADR 0300)", async () => {
+    const { chips, hermes } = await rig();
+    await chips.say("consent please");
+    const asked = await sent(chips, "approval.request");
+    await keptAlways(chips, asked);
+    const words = await sent(chips, "message.post", (event) => event.run_id === asked.run_id);
+    assert.equal(words.payload["text"], "Given: always");
+    // A command's too.
+    await chips.say("ask first");
+    const next = await sent(chips, "approval.request", (event) => event.run_id !== asked.run_id);
+    await keptAlways(chips, next);
+    await sent(chips, "run.completed", (event) => event.run_id === next.run_id);
+    assert.deepEqual(hermes.answers, [
+      { choice: "always", request_id: "req_3" },
+      { choice: "always", request_id: "req_1" },
+    ]);
+  });
+
+  it("picks a scope of Hermes's own only when Hermes is the one that keeps it", () => {
     const decision = (scope: Decision["scope"], allowed = true) => ({ allowed, scope }) as Decision;
-    assert.equal(choiceOf(decision("always"), ["once", "session", "deny"]), "session");
-    assert.equal(choiceOf(decision("session"), ["once", "deny"]), "once");
-    assert.equal(choiceOf(decision("once", false), ["once", "deny"]), "deny");
-    // A command's Always or This session is Hermes's once: Chips remembers its starts (ADR 0239).
-    assert.equal(choiceOf(decision("always"), ["once", "session", "always", "deny"], true), "once");
-    assert.equal(choiceOf(decision("session"), ["once", "session", "deny"], true), "once");
-    assert.equal(choiceOf(decision("always", false), ["once", "deny"], true), "deny");
-    // With Chips's rules off Hermes keeps it, as its own always (Chips ADR 0300).
-    const kept = (scope: Decision["scope"]) => ({ allowed: true, scope, keeps: "harness" }) as unknown as Decision;
-    assert.equal(choiceOf(kept("always"), ["once", "session", "always", "deny"], true), "always");
-    assert.equal(choiceOf(kept("once"), ["once", "session", "always", "deny"], true), "once");
+    const all = ["once", "session", "always", "deny"];
+    // Chips's rules on: Chips keeps an Always or This session, a command's or not (ADR 0239).
+    assert.equal(choiceOf(decision("always"), all), "once");
+    assert.equal(choiceOf(decision("session"), all), "once");
+    assert.equal(choiceOf(decision("once"), all), "once");
+    assert.equal(choiceOf(decision("once", false), all), "deny");
+    assert.equal(choiceOf(decision("always", false), all), "deny");
+    // With Chips's rules off Hermes keeps it, as its own always (Chips ADR 0300), or the next scope down it offers.
+    const kept = (scope: Decision["scope"], allowed = true) => ({ allowed, scope, keeps: "harness" }) as unknown as Decision;
+    assert.equal(choiceOf(kept("always"), all), "always");
+    assert.equal(choiceOf(kept("always"), ["once", "session", "deny"]), "session");
+    assert.equal(choiceOf(kept("always"), ["once", "deny"]), "once");
+    assert.equal(choiceOf(kept("once"), all), "once");
+    assert.equal(choiceOf(kept("always", false), all), "deny");
+  });
+
+  it("ends the turn on one line when nobody answers an ask, and gives Hermes no answer", async () => {
+    const { chips, hermes } = await rig();
+    await chips.say("ask first");
+    const asked = await sent(chips, "approval.request");
+    await expire(chips, asked);
+    await sent(chips, "run.completed", (event) => event.run_id === asked.run_id);
+    // Not a deny, which the agent would take as "try another way": its run is stopped.
+    assert.deepEqual(hermes.answers, []);
+    assert.deepEqual(hermes.stops, ["run_1"]);
+    assert.deepEqual(postsIn(chips, asked.run_id), [UNANSWERED]);
+    assert.equal(UNANSWERED, "Nobody answered, so I stopped. Ask me to carry on.");
+    assert.equal(countOf(chips, "run.failed"), 0);
+    // The next message is a new turn, in the session that holds what it was doing.
+    await chips.say("hello again");
+    const next = await sent(chips, "run.completed", (event) => event.run_id !== asked.run_id);
+    assert.deepEqual(postsIn(chips, next.run_id), ["Here is the answer."]);
+    assert.equal(hermes.sessions.length, 1);
+  });
+
+  it("leaves a run alone when the card expires after Hermes gave up on it and went on", async () => {
+    const { chips, hermes } = await rig();
+    await chips.say("be impatient");
+    const asked = await sent(chips, "approval.request");
+    // Hermes's own wait runs out first: the call ends, and it works on.
+    await sent(chips, "step.log", (event) => event.payload["status"] === "failed");
+    await expire(chips, asked);
+    const done = await sent(chips, "run.completed", (event) => event.run_id === asked.run_id);
+    assert.deepEqual(hermes.stops, [], "nothing stopped");
+    assert.deepEqual(hermes.answers, [], "and nothing answered");
+    assert.deepEqual(postsIn(chips, done.run_id), ["Went another way."]);
+  });
+
+  it("denies Hermes's request when Chips refuses the ask, and says why in its log", async () => {
+    const { chips, client, hermes, logs } = await rig();
+    // Chips refuses this ask, as it does any that isn't what the protocol takes: its question too long.
+    const send = client.send.bind(client);
+    (client as { send: Chips["send"] }).send = (type, envelope, payload, key) =>
+      send(type, envelope, type === "approval.request" ? { ...payload, question: "x".repeat(201) } : payload, key);
+    await chips.say("ask first");
+    await until(() => hermes.answers.length === 1);
+    assert.deepEqual(hermes.answers, [{ choice: "deny", request_id: "req_1" }]);
+    assert.equal(countOf(chips, "approval.request"), 0, "no card came of it");
+    assert.ok(logs.some((line) => line.startsWith("Chips refused an ask of Hermes's, so Hermes is told no: ")), logs.join("\n"));
+    // Hermes goes on from the no, and the turn ends as any other.
+    const run = await sent(chips, "run.completed");
+    assert.deepEqual(postsIn(chips, run.run_id), ["Given: deny"]);
+  });
+
+  it("shows a command longer than a preview may be cut short, with all of it in the action", async () => {
+    const { chips } = await rig();
+    await chips.say("ask huge");
+    const asked = await sent(chips, "approval.request");
+    const preview = asked.payload["preview"] as { body: string };
+    assert.equal(preview.body.length, 200_000);
+    assert.ok(preview.body.startsWith("```sh\necho xxx"));
+    assert.ok(preview.body.endsWith("…\n```"));
+    assert.equal((asked.payload["action"] as { input: { command: string } }).input.command, HUGE_COMMAND);
+    await chips.decide(String(asked.payload["approval_id"]), "approved");
+    const words = await sent(chips, "message.post", (event) => event.run_id === asked.run_id);
+    assert.equal(words.payload["text"], "Given: once");
   });
 });
 

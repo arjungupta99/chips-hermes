@@ -294,6 +294,9 @@ export const CARRIED_ON =
   "You were paused partway through this turn. Nothing you wrote before the pause reached the room, and only " +
   "your answer in this run is posted there: give your whole answer, not just the part after where you stopped.";
 
+/** What a turn ends on, in the room, when an ask of its expired with nobody's answer. */
+export const UNANSWERED = "Nobody answered, so I stopped. Ask me to carry on.";
+
 /** Hermes's events that mean its run is at work: on a paused run, one the pause hasn't stopped. */
 const WORKING: ReadonlySet<string> = new Set([
   "message.delta",
@@ -464,6 +467,8 @@ interface Turn {
   reply: string;
   saidAt: number;
   cancelled: boolean;
+  /** An ask of its expired with nobody's answer: the turn ends there, on `UNANSWERED`. */
+  unanswered: boolean;
   /** Words a person steered with that Hermes wouldn't take mid-run: the next run of the turn. */
   readonly next: string[];
   /** Steps open by Hermes's call id, or by tool for a call that names none, first in first out. */
@@ -1480,6 +1485,7 @@ export class Bridge {
       reply: "",
       saidAt: 0,
       cancelled: false,
+      unanswered: false,
       next: [],
       open: new Map(),
       counted: 0,
@@ -1577,6 +1583,12 @@ export class Bridge {
       if (last === undefined) return;
       const paused = turn.pausing;
       turn.pausing = false;
+      // An ask nobody answered ended it: one line says so, however Hermes's run then ended. Paused
+      // meanwhile, it is said on Resume; stopped, not at all.
+      if (turn.unanswered) {
+        if (await this.resumed(turn)) await this.finish(turn, room, last, UNANSWERED);
+        return;
+      }
       // Stopped for a pause: Hermes's end of that run is not the turn's.
       if (last.event === "run.cancelled" && paused && !turn.cancelled) {
         text = await this.carryOn(turn, last);
@@ -1624,13 +1636,36 @@ export class Bridge {
    * that waited among them (Hermes gives up waiting after its own timeout, and goes on).
    */
   private asking(turn: Turn): boolean {
+    return [...turn.approvals.values()].some((pending) => !pending.answered && this.waitsOn(turn, pending));
+  }
+
+  /** Whether the Hermes run going still waits on this ask, answered or not (see `asking`). */
+  private waitsOn(turn: Turn, pending: Pending): boolean {
+    if (!turn.live || pending.hermesRun !== turn.hermesRun) return false;
     const open = new Set([...turn.open.values()].flat());
-    return [...turn.approvals.values()].some(
-      (pending) =>
-        !pending.answered &&
-        pending.hermesRun === turn.hermesRun &&
-        (pending.during.length === 0 || pending.during.some((stepId) => open.has(stepId))),
-    );
+    return pending.during.length === 0 || pending.during.some((stepId) => open.has(stepId));
+  }
+
+  /**
+   * An ask expired with nobody's answer while Hermes still waits on it, so the turn ends: Hermes's
+   * run is stopped as Stop stops it, which lets go of what it asked. Hermes is not given a deny.
+   * A deny reads as "try another way", and its next try asks again, an hour later, all night. The
+   * turn ends on `UNANSWERED`. False where Hermes couldn't be stopped, and the ask is still its to
+   * be answered.
+   */
+  private async giveUp(turn: Turn): Promise<boolean> {
+    if (turn.unanswered) return true;
+    turn.unanswered = true;
+    try {
+      await turn.agent.client.stop(turn.hermesRun);
+    } catch (error) {
+      turn.unanswered = false;
+      this.log(`Hermes didn't stop ${turn.agent.config.name}'s run ${turn.hermesRun} for an ask nobody answered: ${messageOf(error)}`);
+      return false;
+    }
+    // Its other asks went with the run: their cards' own expiry finds nothing left to answer.
+    for (const each of turn.approvals.values()) each.answered = true;
+    return true;
   }
 
   /**
@@ -1803,7 +1838,7 @@ export class Bridge {
         await this.completed(turn, event);
         break;
       case "approval.request":
-        void this.ask(turn, event);
+        void this.ask(turn, event).catch((error: unknown) => this.log(`an ask of Hermes's went wrong: ${messageOf(error)}`));
         break;
       case "approval.responded":
         await this.settled(turn, event);
@@ -1903,26 +1938,49 @@ export class Bridge {
       risk: [],
       ...(command === undefined
         ? {}
-        : { preview: { format: "markdown" as const, title: "Run a command", body: `\`\`\`sh\n${command}\n\`\`\`` } }),
+        : // The fence takes 10 of the preview's characters; the action holds the whole command.
+          { preview: { format: "markdown" as const, title: "Run a command", body: `\`\`\`sh\n${cut(command, PREVIEW_MAX - 10)}\n\`\`\`` } }),
     });
+    const generation = event["execution_generation"];
+    const answer = (choice: string): Promise<void> =>
+      turn.agent.client
+        .approve(turn.hermesRun, {
+          choice,
+          ...(requestId === undefined ? {} : { request_id: requestId }),
+          ...(typeof generation === "number" ? { execution_generation: generation } : {}),
+        })
+        .catch((error: unknown) => this.log(`Hermes didn't take the answer: ${messageOf(error)}`));
     const stopped = new Promise<undefined>((resolve) => turn.run.on("cancel", () => resolve(undefined)));
-    const decision = await Promise.race([asked, stopped]);
+    let decision: Decision | undefined;
+    try {
+      decision = await Promise.race([asked, stopped]);
+    } catch (error) {
+      // Chips refused the ask, so no card will come of it and no answer: Hermes's request is
+      // denied, rather than left waiting. Hermes's answer takes no reason; the log has it.
+      const refused = turn.approvals.get(requestId ?? approvalId);
+      if (refused === undefined || refused.answered) return;
+      refused.answered = true;
+      this.log(`Chips refused an ask of ${turn.agent.config.name}'s, so Hermes is told no: ${messageOf(error)}`);
+      await answer("deny");
+      return;
+    }
     const pending = turn.approvals.get(requestId ?? approvalId);
     if (decision === undefined || pending === undefined || pending.answered) return;
     // An answer given while the run is paused reaches Hermes once it is resumed (Chips ADR 0293):
     // Hermes waits on it meanwhile, which holds the agent. Stopped meanwhile, Stop has stopped
     // Hermes's run, and the answer goes nowhere.
     if (!(await this.resumed(turn)) || pending.answered) return;
+    if (decision.decision === "expired") {
+      // Hermes gave up on it by its own clock and went on: the card's end is no news to it.
+      const waited = this.waitsOn(turn, pending);
+      pending.answered = true;
+      if (!waited || (await this.giveUp(turn))) return;
+      await answer("deny");
+      return;
+    }
     pending.answered = true;
     if (decision.allowed) turn.allowed.push(approvalId);
-    const generation = event["execution_generation"];
-    await turn.agent.client
-      .approve(turn.hermesRun, {
-        choice: choiceOf(decision, choices, command !== undefined),
-        ...(requestId === undefined ? {} : { request_id: requestId }),
-        ...(typeof generation === "number" ? { execution_generation: generation } : {}),
-      })
-      .catch((error: unknown) => this.log(`Hermes didn't take the answer: ${messageOf(error)}`));
+    await answer(choiceOf(decision, choices));
   }
 
   /** An approval answered in Hermes's own tools: settled in Chips, once, so the card cools (ADR 0079). */
@@ -1949,8 +2007,11 @@ export class Bridge {
 
   // ------------------------------------------------------------------ the end
 
-  /** The turn is over: its words in the room, its tokens, and the run ended. */
-  private async finish(turn: Turn, room: Room, last: RunEvent): Promise<void> {
+  /**
+   * The turn is over: its words in the room, its tokens, and the run ended. With `instead`, those
+   * words are said in place of Hermes's own.
+   */
+  private async finish(turn: Turn, room: Room, last: RunEvent, instead?: string): Promise<void> {
     const { run, agent } = turn;
     if (run.over) return;
     await this.closeSteps(turn, "done");
@@ -1959,7 +2020,7 @@ export class Bridge {
     }
     await this.counted(turn, last);
     const output = typeof last["output"] === "string" ? last["output"].trim() : "";
-    const answer = output !== "" ? output : turn.reply.trim();
+    const answer = instead ?? (output !== "" ? output : turn.reply.trim());
     // The files its `MEDIA:` lines name go with its words, from its folder (Chips TT-7). With no
     // folder set none can go, and the post says so rather than show the lines.
     const { change, note } = await this.sendProject(turn, answer);
@@ -1982,7 +2043,7 @@ export class Bridge {
     const said = post.summary;
     const summary = said === "" ? "Done." : said.length <= 2000 ? said : `${said.slice(0, 1990)}…`;
     await run.complete({ summary });
-    this.log(`${agent.config.name} answered in ${run.spaceId}`);
+    this.log(instead === undefined ? `${agent.config.name} answered in ${run.spaceId}` : `${agent.config.name} stopped in ${run.spaceId}: ${instead}`);
     this.missingReadings();
   }
 
@@ -2061,16 +2122,16 @@ export class Bridge {
 // ------------------------------------------------------------------ small words
 
 /**
- * Hermes's choice for a person's answer: their scope where Hermes offers it, else once. A
- * command's Always or This session is Hermes's once while Chips keeps it (Chips ADR 0239): Chips
- * remembers how each part of it starts and answers the next ask itself, where Hermes's own would
- * let through more. With the harness's Chips's rules off, Chips keeps nothing and says Hermes
- * keeps it (`keeps: "harness"`, Chips ADR 0300), so a command's Always is Hermes's own.
+ * Hermes's choice for a person's answer: a no is deny, and a yes is once, an Always or This
+ * session too, while Chips keeps the rule (Chips ADR 0239). Chips remembers it and answers the
+ * next ask itself, so switching that rule off in Chips brings the asks back; an always Hermes kept
+ * as well would be a second copy Chips can't see or remove. With the harness's Chips's rules off,
+ * Chips keeps nothing and says Hermes keeps it (`keeps: "harness"`, Chips ADR 0300): the answer is
+ * then their scope where Hermes offers it, else the next one down.
  */
-export function choiceOf(decision: Decision, choices: readonly string[], command = false): string {
+export function choiceOf(decision: Decision, choices: readonly string[]): string {
   if (!decision.allowed) return "deny";
-  const harnessKeeps = (decision as { readonly keeps?: string }).keeps === "harness";
-  if (command && !harnessKeeps) return "once";
+  if (decision.keeps !== "harness") return "once";
   if (decision.scope === "always" && choices.includes("always")) return "always";
   if (decision.scope !== "once" && choices.includes("session")) return "session";
   return "once";
@@ -2136,6 +2197,9 @@ export function lookingAgain(note: string | undefined): string {
 
 /** The most an approval's question holds: the protocol's `maxLength`, past which Chips refuses the ask. */
 const QUESTION_MAX = 200;
+
+/** The most a card's preview holds: the protocol's `max`, past which Chips refuses the ask. */
+const PREVIEW_MAX = 200_000;
 
 function cut(text: string, most: number): string {
   return text.length <= most ? text : `${text.slice(0, most - 1)}…`;
