@@ -10,7 +10,8 @@
  * stops it (`CHIPS_STOP_COMMAND`, `chips disconnect <id>`).
  */
 
-import { basename } from "node:path";
+import { realpathSync } from "node:fs";
+import { basename, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { keepEnvironment, keepRunning, keptNode, stopKeeping } from "@chipschat/harness";
 import { configTargetOf } from "./places.js";
@@ -33,14 +34,42 @@ export const handsOver = flags.includes("--keep");
  */
 const whole = (word: string) => configTargetOf(word);
 
-/** This repository, or the installed package, where the kept bridge runs from. */
-const here = fileURLToPath(new URL("..", import.meta.url)).replace(/\/$/, "");
+/**
+ * Where it runs from and the file it runs, as it was started (`process.argv[1]`) when that is this
+ * very file reached through a link; else `root` and `file` as they are. Node resolves the links in
+ * the path of the file it starts, so `import.meta.url` names the release's own folder
+ * (`package-1.0.34/dist/main.js`) when `chips connect` starts the bridge at `package/dist/main.js`,
+ * `package` being the link to the release in use. A service kept with that folder went on running
+ * that release after each update moved the link, and couldn't start at all once the folder was
+ * removed. A command a package manager links to the file (`chips-hermes`) is not the file's own
+ * path, and is left out.
+ */
+export function asStarted(
+  root: string,
+  file: string,
+  started: string | undefined = process.argv[1],
+): { readonly root: string; readonly file: string } {
+  if (started === undefined || started === "") return { root, file };
+  const tail = relative(root, file);
+  const whole = resolve(started);
+  if (!whole.endsWith(`${sep}${tail}`)) return { root, file };
+  try {
+    if (realpathSync(whole) !== realpathSync(file)) return { root, file };
+  } catch {
+    return { root, file };
+  }
+  return { root: whole.slice(0, -tail.length - 1), file: whole };
+}
 
 /**
- * Its bundle, as the published package runs (`dist/main.js`), only for a file named `.js`; else its
- * source, run by tsx, as in a checkout.
+ * This repository, or the installed package, where the kept bridge runs from; and its bundle, as
+ * the published package runs (`dist/main.js`), only for a file named `.js`, else its source, run by
+ * tsx, as in a checkout.
  */
-const self = fileURLToPath(import.meta.url);
+const { root: here, file: self } = asStarted(
+  fileURLToPath(new URL("..", import.meta.url)).replace(/\/$/, ""),
+  fileURLToPath(import.meta.url),
+);
 const run = self.endsWith(".js") ? [self] : ["--import", "tsx", "src/main.ts"];
 
 /** What a person types to run it again: `npm run keep --` in a checkout, else the command itself. */
