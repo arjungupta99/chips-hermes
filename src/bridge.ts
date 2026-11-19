@@ -2062,12 +2062,15 @@ export class Bridge {
 
 /**
  * Hermes's choice for a person's answer: their scope where Hermes offers it, else once. A
- * command's Always or This session is Hermes's once (Chips ADR 0239): Chips remembers how each
- * part of it starts and answers the next ask itself, where Hermes's own would let through more.
+ * command's Always or This session is Hermes's once while Chips keeps it (Chips ADR 0239): Chips
+ * remembers how each part of it starts and answers the next ask itself, where Hermes's own would
+ * let through more. With the harness's Chips's rules off, Chips keeps nothing and says Hermes
+ * keeps it (`keeps: "harness"`, Chips ADR 0300), so a command's Always is Hermes's own.
  */
 export function choiceOf(decision: Decision, choices: readonly string[], command = false): string {
   if (!decision.allowed) return "deny";
-  if (command) return "once";
+  const harnessKeeps = (decision as { readonly keeps?: string }).keeps === "harness";
+  if (command && !harnessKeeps) return "once";
   if (decision.scope === "always" && choices.includes("always")) return "always";
   if (decision.scope !== "once" && choices.includes("session")) return "session";
   return "once";

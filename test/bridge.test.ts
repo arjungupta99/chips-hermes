@@ -1243,6 +1243,10 @@ describe("what it asks", () => {
     assert.equal(choiceOf(decision("always"), ["once", "session", "always", "deny"], true), "once");
     assert.equal(choiceOf(decision("session"), ["once", "session", "deny"], true), "once");
     assert.equal(choiceOf(decision("always", false), ["once", "deny"], true), "deny");
+    // With Chips's rules off Hermes keeps it, as its own always (Chips ADR 0300).
+    const kept = (scope: Decision["scope"]) => ({ allowed: true, scope, keeps: "harness" }) as unknown as Decision;
+    assert.equal(choiceOf(kept("always"), ["once", "session", "always", "deny"], true), "always");
+    assert.equal(choiceOf(kept("once"), ["once", "session", "always", "deny"], true), "once");
   });
 });
 
