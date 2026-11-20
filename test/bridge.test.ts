@@ -29,6 +29,7 @@ import {
 } from "../src/bridge.ts";
 import { HermesClient } from "../src/hermes.ts";
 import { envValue } from "../src/home.ts";
+import { modeIn } from "../src/modes.ts";
 import type { ProfileMaker } from "../src/profiles.ts";
 import { type FakeHermes, fakeProfiles, HUGE_COMMAND, LONG_DESCRIPTION, startFakeHermes } from "./fake-hermes.ts";
 
@@ -72,6 +73,8 @@ async function rig(
     gatherMs?: number;
     /** How often each agent's files are read again. */
     contextEveryMs?: number;
+    /** Each copy of what it runs on its own the bridge sends (Chips ADR 0299), kept here: the fake Chips takes none. */
+    ownRules?: unknown[];
   } = {},
 ): Promise<Rig> {
   const chips = options.chips ?? (await startFakeChips({ capabilities: ["agents"] }));
@@ -79,6 +82,10 @@ async function rig(
   const hermes = options.hermes ?? (await startFakeHermes());
   if (options.hermes === undefined) open.push(() => hermes.close());
   const client = await connect({ url: chips.address.url, token: chips.address.token });
+  const copies = options.ownRules;
+  if (copies !== undefined) {
+    (client.settings as { ownRules: (copy: unknown) => Promise<unknown> }).ownRules = async (copy) => copies.push(copy);
+  }
   const state = options.state ?? { sessions: {} };
   const address = { url: hermes.url, key: hermes.key, profile: options.profile ?? AGENT.profile };
   const logs: string[] = [];
@@ -538,6 +545,149 @@ describe("a Hermes profile of its own for each agent made in Chips (Chips ADR 02
     await until(() => state.made?.[agentId] === undefined);
     assert.equal(state.profiles?.[copy], undefined);
     assert.equal(state.sessions[`${copy}|${second}`], undefined);
+  });
+
+  // Hermes keeps its mode in each profile's config, and Chips's picker had nothing to switch.
+  describe("the mode a person picks in Chips (Chips ADR 0300, 19 November addendum)", () => {
+    /** A person's pick, as the app sends it, or `null` to put it back. */
+    const pick = (chips: FakeChips, mode: Record<string, unknown> | null) =>
+      chips.asOwner({ type: "policy.updated", harness_id: chips.address.harnessId, policy: { autonomy: 1, rules: [], mode } });
+    interface Copy {
+      readonly read_from: string[];
+      readonly note?: string;
+      readonly mode?: string;
+      readonly runs: unknown[];
+      readonly modes?: { readonly base: string; readonly running?: string; readonly offers: { readonly id: string }[] };
+    }
+    const last = (copies: unknown[]) => copies.at(-1) as Copy | undefined;
+    const configPath = (root: string, profile?: string) =>
+      profile === undefined ? join(root, "config.yaml") : join(root, "profiles", profile, "config.yaml");
+    const configOf = (root: string, profile?: string) => readFileSync(configPath(root, profile), "utf8");
+    /** The Main agent's config, as a person's own Hermes has it, which each new profile is cloned from. */
+    const MAIN = "# my Hermes\nmodel:\n  default: heron-2   # picked by hand\n  provider: fake\n\ncommand_allowlist:\n- recursive delete\n";
+
+    it("writes the pick into each profile Chips made, never the default one, and puts back exactly what was there", async () => {
+      const copies: unknown[] = [];
+      const r = await withProfiles({ ownRules: copies });
+      const { chips, root, state, logs } = r;
+      writeFileSync(configPath(root), MAIN);
+      await asked(r, "Nova");
+      await until(() => last(copies)?.modes?.running === "smart");
+      assert.deepEqual(last(copies)?.read_from, [configPath(root, "nova")]);
+      assert.deepEqual(last(copies)?.modes?.offers.map((mode) => mode.id), ["manual", "smart", "off"]);
+      assert.equal(last(copies)?.modes?.base, "smart");
+      assert.equal(last(copies)?.mode, undefined, "no mode of its own: the page would say anything not listed asks");
+      assert.match(last(copies)?.note ?? "", /Main agent runs on your own Hermes's default profile/);
+
+      await pick(chips, { id: "off", name: "Off", back_to: "Smart", everything: true });
+      await until(() => modeIn(configOf(root, "nova")) === "off");
+      assert.equal(configOf(root, "nova"), `${MAIN}approvals:\n  mode: "off"\n`);
+      assert.equal(configOf(root), MAIN, "the Main agent's profile, which the person's own Hermes reads, is left");
+      assert.deepEqual(state.modes, { nova: { was: null, section: true, wrote: "off", pick: "off|" } }, "what to put back, kept first");
+      await until(() => last(copies)?.modes?.running === "off");
+      assert.ok(logs.includes("mode from Chips: Off until a person changes it, written into nova"), logs.join("\n"));
+
+      // What a person adds meanwhile stays: an entry Hermes keeps, and a note of theirs.
+      const theirs = configOf(root, "nova").replace("- recursive delete\n", "- recursive delete\n- git force push\n");
+      writeFileSync(configPath(root, "nova"), `${theirs}# mine\n`);
+      await pick(chips, null);
+      await until(() => state.modes === undefined);
+      assert.equal(configOf(root, "nova"), `${MAIN.replace("- recursive delete\n", "- recursive delete\n- git force push\n")}# mine\n`);
+      assert.equal(configOf(root), MAIN);
+      await until(() => last(copies)?.modes?.running === "smart");
+      assert.ok(logs.includes("mode from Chips: back to Smart; nova put back as it was"), logs.join("\n"));
+    });
+
+    it("puts back the line that was there when the time is up", async () => {
+      const r = await withProfiles();
+      const { chips, root, state } = r;
+      const main = `${MAIN}approvals:\n  mode: manual  # see each one\n  timeout: 60\n`;
+      writeFileSync(configPath(root), main);
+      await asked(r, "Nova");
+      await pick(chips, { id: "off", until: new Date(Date.now() + 700).toISOString() });
+      await until(() => modeIn(configOf(root, "nova")) === "off");
+      assert.equal(configOf(root, "nova"), `${MAIN}approvals:\n  mode: "off"\n  timeout: 60\n`);
+      await until(() => state.modes === undefined, 4000);
+      assert.equal(configOf(root, "nova"), main);
+    });
+
+    it("gives the pick to a profile made while it holds", async () => {
+      const copies: unknown[] = [];
+      const r = await withProfiles({ ownRules: copies });
+      const { chips, root, logs } = r;
+      await pick(chips, { id: "manual", name: "Manual", back_to: "Smart" });
+      await until(() => logs.includes("mode from Chips: Manual until a person changes it, for each profile Chips makes"));
+      await asked(r, "Vega");
+      await until(() => modeIn(configOf(root, "vega")) === "manual");
+      assert.ok(
+        logs.includes("Vega's profile vega goes into Manual, as picked in Chips, until a person changes it"),
+        logs.join("\n"),
+      );
+      await until(() => last(copies)?.modes?.running === "manual");
+      assert.equal(modeIn(configOf(root)), "smart", "the Main agent's stays its own");
+    });
+
+    it("puts back what a pick wrote when the bridge starts again with none in force, after a stop in the middle of it", async () => {
+      const first = await withProfiles();
+      writeFileSync(configPath(first.root), MAIN);
+      await asked(first, "Nova");
+      await pick(first.chips, { id: "off" });
+      await until(() => modeIn(configOf(first.root, "nova")) === "off");
+      first.bridge.stop();
+      first.client.close();
+      // Put back in Chips while the bridge was away.
+      await pick(first.chips, null);
+      const again = await withProfiles({ chips: first.chips, hermes: first.hermes, state: first.state, hermesRoot: first.root });
+      assert.equal(configOf(first.root, "nova"), MAIN);
+      assert.equal(again.state.modes, undefined);
+      assert.ok(again.logs.includes("mode from Chips: back to Smart; nova put back as it was"), again.logs.join("\n"));
+    });
+
+    it("leaves a mode a person wrote while a pick held, when it starts again with the pick in force", async () => {
+      const first = await withProfiles();
+      writeFileSync(configPath(first.root), MAIN);
+      await asked(first, "Nova");
+      await pick(first.chips, { id: "off" });
+      await until(() => modeIn(configOf(first.root, "nova")) === "off");
+      first.bridge.stop();
+      first.client.close();
+      const theirs = configOf(first.root, "nova").replace('mode: "off"', "mode: manual");
+      writeFileSync(configPath(first.root, "nova"), theirs);
+      const again = await withProfiles({ chips: first.chips, hermes: first.hermes, state: first.state, hermesRoot: first.root });
+      // The SDK says the hello's pick as a change too, a moment later: it is no new pick.
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      assert.equal(configOf(first.root, "nova"), theirs);
+      assert.equal(again.state.modes?.["nova"]?.theirs, true, "theirs while the pick holds");
+      assert.ok(
+        again.logs.includes("mode from Chips: Off until a person changes it; nova left as it is: someone put it in manual since"),
+        again.logs.join("\n"),
+      );
+      // Theirs across another start too.
+      again.bridge.stop();
+      again.client.close();
+      const third = await withProfiles({ chips: first.chips, hermes: first.hermes, state: first.state, hermesRoot: first.root });
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      assert.equal(configOf(first.root, "nova"), theirs);
+      assert.deepEqual(
+        third.logs.filter((line) => line.startsWith("mode from Chips")),
+        [],
+        "nothing changed",
+      );
+      // A new pick from Chips goes in its place, and puts theirs back when its time is up.
+      await pick(first.chips, { id: "off", until: new Date(Date.now() + 600).toISOString() });
+      await until(() => modeIn(configOf(first.root, "nova")) === "off");
+      await until(() => third.state.modes === undefined, 4000);
+      assert.equal(configOf(first.root, "nova"), theirs);
+    });
+
+    it("says the mode a person set in a profile themselves, read back from its config", async () => {
+      const copies: unknown[] = [];
+      const r = await withProfiles({ ownRules: copies, contextEveryMs: 30 });
+      await asked(r, "Nova");
+      await until(() => last(copies)?.modes?.running === "smart");
+      writeFileSync(configPath(r.root, "nova"), `${configOf(r.root, "nova")}approvals:\n  mode: manual\n`);
+      await until(() => last(copies)?.modes?.running === "manual");
+    });
   });
 });
 

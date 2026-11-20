@@ -38,11 +38,17 @@
  * adds to its config (`fills.ts`, `hooks.ts`). And its model (Chips ADR 0141): one of those
  * Hermes has for its profile, which each of its runs asks for (`models.ts`).
  *
+ * The mode a person picks for Hermes on its settings page in Chips (Chips ADR 0300) is written into
+ * the config of each profile Chips made for one of its agents, and what was there is put back when
+ * the pick ends (`modes.ts`). The Main agent's profile, which the person's own Hermes reads too, is
+ * left as it is. What it runs on its own says those modes and the one the profiles run in
+ * (`own-rules.ts`).
+ *
  * Hermes can't be told anything outside a run, and keeps no schedule this bridge reads yet, so
  * neither is claimed.
  */
 
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type {
   Ack,
@@ -53,6 +59,8 @@ import type {
   Chips,
   Decision,
   HarnessContextCopy,
+  OwnRules,
+  PolicyMode,
   Project,
   Run,
   SettingsHandlers,
@@ -91,13 +99,15 @@ import {
   type WindowCompactFrame,
   withRole,
 } from "@chipschat/protocol";
-import { Contexts, type Profile, type Reader, type Roster } from "./context.js";
+import { Contexts, type Profile, type Reader, type Roster, writeWhole } from "./context.js";
 import { Fills, type KeptFills, WHY_NOT, whyReadOnly } from "./fills.js";
 import { folds, GATHER_MS, type Heard, keepAnswered, keepHeard } from "./fold.js";
 import { HermesClient, HermesError, type ProfileAddress, type RunEvent, TERMINAL } from "./hermes.js";
-import { envValue, profileHome, profileName } from "./home.js";
+import { configText, envValue, profileHome, profileName } from "./home.js";
 import { hookUrl, SECRET_ENV } from "./hooks.js";
+import { BASE_MODE, HERMES_MODES, type KeptMode, listWords, modeIn, modeName, pickInto, putBack, untilWords } from "./modes.js";
 import { copyOf, type ModelOptions, type RunModel, runModelOf } from "./models.js";
+import { hermesOwnRules } from "./own-rules.js";
 import { freeProfile, KEY_ENV, type ProfileMaker, readyProfile } from "./profiles.js";
 
 export interface AgentConfig {
@@ -145,6 +155,11 @@ export interface BridgeState {
    * of its runs asks for; `null` for Hermes's default, the profile's own.
    */
   models?: Record<string, string | null>;
+  /**
+   * A Hermes profile Chips wrote a picked mode into (Chips ADR 0300) → what its config said of
+   * `approvals.mode` before, to put back when the pick ends, and what Chips wrote (`modes.ts`).
+   */
+  modes?: Record<string, KeptMode>;
 }
 
 /**
@@ -546,6 +561,10 @@ export class Bridge {
   private holds = 0;
   /** What went wrong in the last restart, said in place of the watch's own words while Hermes doesn't answer. */
   private why: string | undefined;
+  /** Picks written into the profiles and put back, one after another (Chips ADR 0300, `modes.ts`). */
+  private moding: Promise<void> = Promise.resolve();
+  /** The pick last handled, as `id|until`: the hello's, said again as a change, is no new pick. */
+  private modeSeen: string | undefined;
 
   constructor(private readonly options: BridgeOptions) {
     this.log = options.log ?? (() => undefined);
@@ -637,6 +656,10 @@ export class Bridge {
       this.forget(String(heard["agent_id"]), typeof name === "string" ? name : undefined);
       void this.agentsMoved();
     });
+    // A mode a person picked in Chips, or its end (Chips ADR 0300): into the profiles Chips made, or back out.
+    chips.on("mode", () => void this.inModes(() => this.remode(false)));
+    // A pick that holds now is written; with none, what a pick before wrote is put back.
+    await this.inModes(() => this.remode(true));
     await this.sayHowItIs();
     this.health = setInterval(() => void this.sayHowItIs(), this.options.healthEveryMs ?? 30_000);
     this.health.unref();
@@ -677,9 +700,14 @@ export class Bridge {
   private async startSettings(): Promise<void> {
     this.listed = await this.options.chips.agents.list().catch(() => this.listed);
     await this.sendModels();
+    await this.sendOwnRules();
     if (this.contexts === undefined) return;
     await this.contexts.refresh();
-    this.contextTimer = setInterval(() => void this.contexts?.refresh(), this.options.contextEveryMs ?? 15_000);
+    // What the profiles run in, read again with the files: a person may change it in Hermes too.
+    this.contextTimer = setInterval(() => {
+      void this.contexts?.refresh();
+      void this.sendOwnRules();
+    }, this.options.contextEveryMs ?? 15_000);
     this.contextTimer.unref();
     const fills = this.fills;
     const asked = this.options.fills;
@@ -714,6 +742,7 @@ export class Bridge {
     }
     await this.contexts?.refresh();
     await this.sendModels();
+    await this.sendOwnRules();
   }
 
   /** Everyone the bridge keeps anything for: a configured agent by its key, any other by its Chips id. */
@@ -942,6 +971,184 @@ export class Bridge {
     throw new Refuse(whyReadOnly(profile?.name ?? "default"), this.fills?.copyOf(frame.agent_id));
   }
 
+  // ------------------------------------------------------------------ the mode picked in Chips
+
+  /** A change to the profiles' modes, after those before it: each reads and writes their configs. */
+  private inModes(task: () => void): Promise<void> {
+    const next = this.moding.then(task).catch((error: unknown) => this.log(`a mode from Chips went wrong: ${messageOf(error)}`));
+    this.moding = next;
+    return next;
+  }
+
+  /** The mode picked in Chips that holds now, where it is one of Hermes's and not the one it starts in. */
+  private pickNow(): PolicyMode | undefined {
+    const mode = this.options.chips.mode;
+    if (mode === undefined || mode.id === BASE_MODE) return undefined;
+    return HERMES_MODES.some((each) => each.id === mode.id) ? mode : undefined;
+  }
+
+  /** The profiles Chips made for its agents, which a pick is written into: never the default profile. */
+  private madeProfiles(): string[] {
+    const root = this.options.hermesRoot;
+    if (root === undefined) return [];
+    return [...new Set(Object.values(this.options.state.made ?? {}))].filter(
+      (profile) => profileHome(root, profile) !== root && existsSync(profileHome(root, profile)),
+    );
+  }
+
+  /**
+   * The profiles Chips made into the mode picked in Chips, or back as they were (Chips ADR 0300): at
+   * each change a person makes, at a pick's end, and at the start. Each one written into already
+   * follows a new pick, even once its agent is deleted, until what was there is put back. One line
+   * in the log says what changed.
+   */
+  private remode(start: boolean): void {
+    const { hermesRoot: root, state } = this.options;
+    if (root === undefined) return;
+    const picked = this.options.chips.mode;
+    const seen = picked === undefined ? "" : pickKey(picked);
+    // A change a person made in Chips. The hello's pick, said again as a change, changes nothing.
+    const heard = !start && seen !== this.modeSeen;
+    if (!start && !heard) return;
+    this.modeSeen = seen;
+    const pick = this.pickNow();
+    let line: string | undefined;
+    if (pick !== undefined) {
+      const into: string[] = [];
+      const left: string[] = [];
+      const profiles = [...new Set([...this.madeProfiles(), ...Object.keys(state.modes ?? {})])];
+      for (const profile of profiles) {
+        const done = this.pickInto(root, profile, pick.id, seen);
+        if (done === undefined) continue;
+        if ("left" in done) left.push(`${profile} left as it is: ${done.left}`);
+        else if (done.wrote) into.push(profile);
+      }
+      const where =
+        into.length > 0 ? `, written into ${listWords(into)}` : profiles.length === 0 ? ", for each profile Chips makes" : "";
+      if (heard || into.length > 0 || left.length > 0) {
+        line = [`mode from Chips: ${modeName(pick.id)} ${untilWords(pick)}${where}`, ...left].join("; ");
+      }
+    } else {
+      const { back, left } = this.putAllBack(root);
+      const odd = picked !== undefined && picked.id !== BASE_MODE ? `, as ${picked.id} isn't one of Hermes's modes` : "";
+      if (heard || back.length > 0 || left.length > 0) {
+        const put = back.length > 0 ? `; ${listWords(back)} put back as ${back.length === 1 ? "it was" : "they were"}` : "";
+        line = [`mode from Chips: back to ${modeName(BASE_MODE)}${odd}${put}`, ...left].join("; ");
+      }
+    }
+    if (line !== undefined) this.log(line);
+    void this.sendOwnRules();
+  }
+
+  /**
+   * One profile into a mode: whether its config changed, or why it is left. What was there is kept
+   * in the state before the config is written, so a stop between the two still puts it back. A
+   * profile gone from disk has nothing to put back, and is forgotten.
+   */
+  private pickInto(
+    root: string,
+    profile: string,
+    mode: string,
+    pick: string,
+  ): { readonly wrote: boolean } | { readonly left: string } | undefined {
+    const { state } = this.options;
+    const home = profileHome(root, profile);
+    // The default profile is the Main agent's and the person's own Hermes's: never written.
+    if (home === root || !existsSync(home)) {
+      if (state.modes?.[profile] !== undefined) this.dropKept(profile);
+      return undefined;
+    }
+    const path = join(home, "config.yaml");
+    if (!existsSync(path)) return { left: "it has no config.yaml" };
+    const text = readFileSync(path, "utf8");
+    const kept = state.modes?.[profile];
+    const planned = pickInto(text, mode, kept, pick);
+    if ("why" in planned) return { left: planned.why };
+    if ("theirs" in planned) {
+      // Theirs while this pick holds, said once, and nothing of Chips's to put back.
+      if (kept === undefined || kept.theirs === true) return undefined;
+      state.modes = { ...state.modes, [profile]: { ...kept, theirs: true } };
+      this.options.saveState(state);
+      return { left: planned.theirs };
+    }
+    if (JSON.stringify(planned.kept) !== JSON.stringify(kept)) {
+      state.modes = { ...state.modes, [profile]: planned.kept };
+      this.options.saveState(state);
+    }
+    if (planned.text === text) return { wrote: false };
+    writeWhole(path, planned.text);
+    return { wrote: true };
+  }
+
+  /** What each profile Chips wrote a pick into had, put back: those put back, and those left and why. */
+  private putAllBack(root: string): { readonly back: string[]; readonly left: string[] } {
+    const back: string[] = [];
+    const left: string[] = [];
+    const kept = Object.entries(this.options.state.modes ?? {});
+    for (const [profile, was] of kept) {
+      const path = join(profileHome(root, profile), "config.yaml");
+      if (!existsSync(path)) continue;
+      const text = readFileSync(path, "utf8");
+      const done = putBack(text, was);
+      if ("left" in done) {
+        left.push(`${profile} left as it is: ${done.left}`);
+        continue;
+      }
+      if (done.text !== text) writeWhole(path, done.text);
+      back.push(profile);
+    }
+    if (kept.length > 0) {
+      delete this.options.state.modes;
+      this.options.saveState(this.options.state);
+    }
+    return { back, left };
+  }
+
+  private dropKept(profile: string): void {
+    const { state } = this.options;
+    if (state.modes === undefined) return;
+    delete state.modes[profile];
+    if (Object.keys(state.modes).length === 0) delete state.modes;
+    this.options.saveState(state);
+  }
+
+  /** A profile made for an agent while a mode picked in Chips holds: into it, and the log says so. */
+  private pickNew(profile: string, name: string): void {
+    const root = this.options.hermesRoot;
+    const pick = this.pickNow();
+    if (root === undefined || pick === undefined) return;
+    const done = this.pickInto(root, profile, pick.id, pickKey(pick));
+    if (done === undefined) return;
+    this.log(
+      "left" in done
+        ? `${name}'s profile ${profile} stays in its own mode, not ${modeName(pick.id)} as picked in Chips: ${done.left}`
+        : `${name}'s profile ${profile} goes into ${modeName(pick.id)}, as picked in Chips, ${untilWords(pick)}`,
+    );
+    void this.sendOwnRules();
+  }
+
+  /**
+   * What Hermes runs on its own (Chips ADR 0299), with the modes a person may pick for it and the
+   * one the profiles Chips made run in, read back from their configs (Chips ADR 0300). Only where
+   * Chips makes its agents profiles of their own: with none, nothing can be switched.
+   */
+  private ownRules(): OwnRules | undefined {
+    const root = this.options.hermesRoot;
+    if (root === undefined || this.options.profiles === undefined) return undefined;
+    const profiles = this.madeProfiles();
+    const modes = profiles.map((profile) => modeIn(configText(profileHome(root, profile))));
+    const target = this.pickNow()?.id ?? BASE_MODE;
+    // Where they differ, the one that isn't in the mode in force: the page says it couldn't use it.
+    const running = modes.length === 0 ? undefined : (modes.find((mode) => mode !== target) ?? target);
+    return hermesOwnRules({ root, profiles, running });
+  }
+
+  /** The copy sent, where it changed: Chips takes the same copy once, and an older Chips refuses it. */
+  private async sendOwnRules(): Promise<void> {
+    const copy = this.ownRules();
+    if (copy !== undefined) await this.options.chips.settings.ownRules(copy).catch(() => undefined);
+  }
+
   /** The Main agent, the first registered, once started: who says the harness's first words. */
   get mainAgentId(): string | undefined {
     return this.agents[0]?.agentId;
@@ -1033,6 +1240,8 @@ export class Bridge {
     const running = this.runningOn(agentId, profile, name);
     if (running !== undefined) this.own.set(agentId, running);
     this.log(`${name} has a Hermes profile of its own, ${profile}, cloned from ${from}`);
+    // Made while a mode picked in Chips holds, it runs in that mode too (Chips ADR 0300).
+    await this.inModes(() => this.pickNew(profile, name));
     const served = await profiles.serve().catch(() => undefined);
     if (served === false) {
       this.log(`Hermes's gateway serves only the profile it started with, as it does when there was one: restarting it once, so it serves ${profile} too`);
@@ -2140,6 +2349,11 @@ export function choiceOf(decision: Decision, choices: readonly string[]): string
 function idOf(event: RunEvent): string | undefined {
   const id = event["request_id"] ?? event["prompt_id"];
   return typeof id === "string" && id !== "" ? id : undefined;
+}
+
+/** A pick as the bridge tells one from another: its mode and when it ends. */
+function pickKey(mode: PolicyMode): string {
+  return `${mode.id}|${mode.until ?? ""}`;
 }
 
 function messageOf(error: unknown): string {
