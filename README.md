@@ -84,6 +84,15 @@ result then says "auto-approved by smart approval", and no card is asked. Only w
 escalates goes the way above. `approvals.mode: manual` leaves every flagged command to a person; it
 hasn't been tried through Chips yet.
 
+**A mode picked in Chips** (Chips ADR 0300). On Hermes's settings page in Chips a person can pick
+Manual, Smart or Off for a while. The bridge writes `approvals.mode` into the config of each
+profile Chips made for one of its agents, changing only that line, and puts back exactly what was
+there when the time is up, when they switch back, or when the bridge starts with no pick in force.
+What was there is kept in `sessions.json` before anything is written. Hermes reads it at its next
+risky command, with no restart. The Main agent runs on the default profile, which your own Hermes
+reads too, so it keeps its mode. A mode you write into a profile while a pick holds is yours and
+stays. Needs Chips SDK 1.0.11; on an older one nothing changes.
+
 ## From Chips's gallery
 
 The card's line is `CHIPS_JOIN_LINK='<link>' chips connect hermes` (Chips ADR 0218). It downloads this bridge as the npm package
